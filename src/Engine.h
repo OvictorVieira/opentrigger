@@ -8,6 +8,8 @@
 #include <memory>
 
 constexpr int kSlots = 8;
+constexpr int kLanes = 6;   // mic lanes per slot: lane 0 is the slot's own mic, lanes 1.. are extra mics played with it
+constexpr int kBuses = 8;   // stereo outputs: 0 = Main, 1..7 = auxiliary outputs the host can route to other tracks
 
 // ---- fully decoded instrument (used by the instrument editor and tests) -------------------------------
 struct LoadedInstrument
@@ -57,6 +59,14 @@ struct PreviewSound
 };
 PreviewSound buildPreview (std::shared_ptr<const InstrumentData>, int velocity, juce::Random&, juce::String& error);
 
+// Where one mic lane goes: an output bus (0 = Main) and its own level.
+struct LaneParams
+{
+    int bus = 0;
+    float gainDb = 0.0f;
+    bool on = true;
+};
+
 struct SlotParams
 {
     float gainDb = 0.0f, pan = 0.0f, tuneSemis = 0.0f;
@@ -100,13 +110,19 @@ public:
         int source = both;
         int midiNote = -1;         // -1: any note triggers
         std::array<SlotParams, kSlots> slot;
+        std::array<std::array<LaneParams, kLanes>, kSlots> lane;
+        // channel index (in the host's buffer) of each output bus, -1 when the host has not enabled it. A lane routed to a
+        // bus that is not enabled plays on Main instead, so nothing ever goes silent.
+        std::array<int, kBuses> busChannel { 0, -1, -1, -1, -1, -1, -1, -1 };
+        int mainChannels = 0;      // channels of the main bus (1 or 2); 0 = every channel of the buffer is main
     };
 
     TriggerEngine();
     void prepare (double sampleRate, int maxBlock);
     void reset();
     // Message thread: hand over new content for one slot (nullptr empties it).
-    void setSlotContent (int slot, std::shared_ptr<SlotContent>);
+    void setSlotContent (int slot, std::shared_ptr<SlotContent>);   // lane 0
+    void setLaneContent (int slot, int lane, std::shared_ptr<SlotContent>);
     // Message thread: play the slot once, as if a hit of this velocity came in (ignores Mix).
     // Message thread: free content the audio thread has already swapped out (call every few seconds).
     void releaseParked();
@@ -134,22 +150,24 @@ private:
         double pos = 0.0, step = 1.0;
         float gL = 0.0f, gR = 0.0f;
         juce::uint64 started = 0;
-        int slot = -1;
+        int slot = -1, lane = 0, bus = 0;
         int delay = 0;      // samples to wait before this voice starts sounding
     };
-    static constexpr int kVoices = 96, kAuditionVoices = 24;
+    static constexpr int kVoices = 192, kAuditionVoices = 24;
 
     void adoptPending();
     void fire (int velocity, const Params&, int delay);
-    void triggerSlot (int slot, int velocity, const SlotParams&, bool audition, int delay);
-    void startVoice (std::array<Voice, kVoices>&, const SlotContent&, int slot, int waveIdx, float gain, const SlotParams&, int delay);
-    void renderVoice (Voice&, float* l, float* r, int n);
-    template <size_t N> void renderVoices (std::array<Voice, N>&, float* l, float* r, int n);
+    struct BusOut { float* l[kBuses] {}; float* r[kBuses] {}; };
+    void triggerSlot (int slot, int velocity, const Params&, bool audition, int delay);
+    void startVoice (std::array<Voice, kVoices>&, const SlotContent&, int slot, int lane, int bus, int waveIdx, float gain, const SlotParams&, int delay);
+    void renderVoice (Voice&, const BusOut&, int n);
+    template <size_t N> void renderVoices (std::array<Voice, N>&, const BusOut&, int n);
     void updateFilters (const Params&);
 
-    std::array<std::shared_ptr<SlotContent>, kSlots> slots;        // audio thread only
-    std::array<std::shared_ptr<SlotContent>, kSlots> pendingSlots; // guarded by lock; holds the *old* content after a swap
-    unsigned pendingMask = 0;
+    static constexpr int kContents = kSlots * kLanes;               // index = slot * kLanes + lane
+    std::array<std::shared_ptr<SlotContent>, kContents> slots;        // audio thread only
+    std::array<std::shared_ptr<SlotContent>, kContents> pendingSlots; // guarded by lock; holds the *old* content after a swap
+    juce::uint64 pendingMask = 0;
     juce::SpinLock lock;
     std::array<std::atomic<int>, kSlots> auditionRequest {};
 

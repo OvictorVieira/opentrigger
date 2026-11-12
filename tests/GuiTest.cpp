@@ -600,6 +600,251 @@ struct GuiTests : juce::UnitTest
     }
 };
 static GuiTests guiTests;
+
+// ------------------------------------------------------------------------------------------------ multi-output
+juce::File writeMicKit (const juce::File& dir)
+{
+    otci::Instrument k;
+    k.name = "Mics"; k.library = "L";
+    k.waves = { constWave (0.1f), constWave (0.2f), constWave (0.3f), constWave (0.4f), constWave (0.5f) };
+    const char* names[] = { "Hit / Full Mix", "Hit / Kick In", "Hit / Kick Out", "Hit / Room", "Cross Stick / Kick In" };
+    for (int i = 0; i < 5; ++i)
+    {
+        otci::Articulation a;
+        a.name = names[i];
+        a.layers = { { 0, 1.0f, 1.0f, { { i } } } };
+        k.articulations.push_back (a);
+    }
+    auto f = dir.getChildFile ("Mics.otci");
+    juce::String err;
+    otci::write (f, k, err);
+    return f;
+}
+
+struct LaneTests : juce::UnitTest
+{
+    LaneTests() : juce::UnitTest ("Mic lanes and outputs", "OpenTrigger") {}
+
+    static void waitUntil (std::function<bool()> done, int ms = 8000)
+    {
+        for (int waited = 0; waited < ms && ! done(); waited += 20)
+            juce::MessageManager::getInstance()->runDispatchLoopUntil (20);
+    }
+    // One MIDI hit through processBlock with as many channels as the host currently gives the plug-in; returns the channels at one sample.
+    static std::vector<float> hitAll (OpenTriggerProcessor& proc, int vel = 100)
+    {
+        proc.prepareToPlay (44100.0, 512);
+        const int L = proc.getLatencySamples();
+        juce::AudioBuffer<float> io (std::max (2, proc.getTotalNumOutputChannels()), L + 256);
+        io.clear();
+        juce::MidiBuffer m;
+        m.addEvent (juce::MidiMessage::noteOn (1, 60, (juce::uint8) vel), 0);
+        proc.processBlock (io, m);
+        std::vector<float> out;
+        for (int c = 0; c < io.getNumChannels(); ++c) out.push_back (io.getSample (c, L + 100));
+        return out;
+    }
+    static bool slotReady (OpenTriggerProcessor& p, int s) { return p.slotInfo (s).status == OpenTriggerProcessor::SlotStatus::ready; }
+    static void loadAndWait (OpenTriggerProcessor& p, int s, const juce::File& f)
+    {
+        p.loadSlot (s, f);
+        waitUntil ([&] { return slotReady (p, s); });
+    }
+    static void lanesReady (OpenTriggerProcessor& p, int s, std::initializer_list<int> lanes)
+    {
+        waitUntil ([&] { for (int l : lanes) if (! p.laneInfo (s, l).ready) return false; return true; });
+    }
+    static void silenceOthers (OpenTriggerProcessor& p)
+    {
+        p.apvts.getParameter ("mix")->setValueNotifyingHost (1.0f);
+    }
+
+    void runTest() override
+    {
+        auto root = juce::File::getSpecialLocation (juce::File::tempDirectory).getChildFile ("ot_lane_" + juce::String (juce::Random::getSystemRandom().nextInt64()));
+        auto lib = root.getChildFile ("lib");
+        lib.createDirectory();
+        setenv ("OPENTRIGGER_LIBRARY", lib.getFullPathName().toRawUTF8(), 1);
+        const auto kit = writeMicKit (lib);
+
+        beginTest ("the extra outputs exist, are off by default, and the old stereo behaviour is untouched");
+        OpenTriggerProcessor proc;
+        proc.setPlayConfigDetails (2, 2, 44100.0, 512);
+        silenceOthers (proc);
+        expectEquals (proc.getBusCount (false), 8);
+        for (int b = 1; b < 8; ++b) expect (! proc.getBus (false, b)->isEnabled(), "Out " + juce::String (b + 1) + " off by default");
+        expectEquals (proc.getTotalNumOutputChannels(), 2);
+        loadAndWait (proc, 0, kit);
+        expect (slotReady (proc, 0));
+        {
+            auto h = hitAll (proc);
+            expectWithinAbsoluteError (h[0], 0.1f, 3e-3f);                      // slot 0, lane 0, mic "Full Mix"
+            expect (! proc.laneInfo (0, 1).on, "no extra lane until asked for");
+        }
+
+        beginTest ("a lane routed to an output the host has not enabled plays on Main (never silent)");
+        {
+            proc.setLaneArticulation (0, 1, 1);
+            proc.setLaneBus (0, 1, 1);
+            proc.setLaneOn (0, 1, true);
+            lanesReady (proc, 0, { 1 });
+            expect (proc.laneInfo (0, 1).ready);
+            auto h = hitAll (proc);
+            expectEquals ((int) h.size(), 2);
+            expectWithinAbsoluteError (h[0], 0.1f + 0.2f, 3e-3f);
+        }
+
+        beginTest ("with Out 2 enabled: Main carries lane 0 only, Out 2 carries the extra mic");
+        {
+            expect (proc.getBus (false, 1)->enable (true), "host can enable Out 2");
+            expectEquals (proc.getTotalNumOutputChannels(), 4);
+            expectEquals (proc.getChannelIndexInProcessBlockBuffer (false, 1, 0), 2);
+            auto h = hitAll (proc);
+            expectEquals ((int) h.size(), 4);
+            expectWithinAbsoluteError (h[0], 0.1f, 3e-3f);
+            expectWithinAbsoluteError (h[1], 0.1f, 3e-3f);
+            expectWithinAbsoluteError (h[2], 0.2f, 3e-3f);
+            expectWithinAbsoluteError (h[3], 0.2f, 3e-3f);
+        }
+
+        beginTest ("lane level, lane off, lane back on; output volume applies to the outputs too; Mix only touches Main");
+        {
+            proc.setLaneGain (0, 1, -6.0206f);
+            expectWithinAbsoluteError (hitAll (proc)[2], 0.1f, 3e-3f);
+            proc.setLaneGain (0, 1, 0.0f);
+            proc.setLaneOn (0, 1, false);
+            { auto h = hitAll (proc); expectWithinAbsoluteError (h[0], 0.1f, 3e-3f); expectWithinAbsoluteError (h[2], 0.0f, 1e-4f); }
+            proc.setLaneOn (0, 1, true);
+            lanesReady (proc, 0, { 1 });
+            expectWithinAbsoluteError (hitAll (proc)[2], 0.2f, 3e-3f);
+            proc.apvts.getParameter ("gain")->setValueNotifyingHost (proc.apvts.getParameter ("gain")->convertTo0to1 (6.0206f));
+            { auto h = hitAll (proc); expectWithinAbsoluteError (h[0], 0.2f, 4e-3f); expectWithinAbsoluteError (h[2], 0.4f, 4e-3f); }
+            proc.apvts.getParameter ("gain")->setValueNotifyingHost (proc.apvts.getParameter ("gain")->convertTo0to1 (0.0f));
+            proc.apvts.getParameter ("mix")->setValueNotifyingHost (0.0f);          // dry only on Main; the outputs keep the sampled sound
+            { auto h = hitAll (proc); expectWithinAbsoluteError (h[0], 0.0f, 1e-4f); expectWithinAbsoluteError (h[2], 0.2f, 3e-3f); }
+            proc.apvts.getParameter ("mix")->setValueNotifyingHost (1.0f);
+        }
+
+        beginTest ("changing a lane's mic while Out 2 is on swaps the sound; lane 0's mic is independent");
+        {
+            proc.setLaneArticulation (0, 1, 2);                               // Kick Out
+            lanesReady (proc, 0, { 1 });
+            waitUntil ([&] { return proc.laneInfo (0, 1).ready && std::abs (hitAll (proc)[2] - 0.3f) < 5e-3f; });
+            expectWithinAbsoluteError (hitAll (proc)[2], 0.3f, 3e-3f);
+            proc.setSlotArticulation (0, 3);                                  // slot's own mic -> Room
+            waitUntil ([&] { return proc.slotInfo (0).contentArticulation == 3; });
+            auto h = hitAll (proc);
+            expectWithinAbsoluteError (h[0], 0.4f, 3e-3f);
+            expectWithinAbsoluteError (h[2], 0.3f, 3e-3f);
+            proc.setSlotArticulation (0, 0);
+            waitUntil ([&] { return proc.slotInfo (0).contentArticulation == 0; });
+        }
+
+        beginTest ("Split mics to outputs: each mic of the stroke type gets its own lane and output, Full Mix and other strokes are left out");
+        {
+            proc.setLaneOn (0, 1, false);
+            proc.splitMicsToOutputs (0, "Hit");
+            expect (proc.laneInfo (0, 1).on && proc.laneInfo (0, 1).articulation == 1 && proc.laneInfo (0, 1).bus == 1, "Kick In -> Out 2");
+            expect (proc.laneInfo (0, 2).on && proc.laneInfo (0, 2).articulation == 2 && proc.laneInfo (0, 2).bus == 2, "Kick Out -> Out 3");
+            expect (proc.laneInfo (0, 3).on && proc.laneInfo (0, 3).articulation == 3 && proc.laneInfo (0, 3).bus == 3, "Room -> Out 4");
+            expect (! proc.laneInfo (0, 4).on && ! proc.laneInfo (0, 5).on, "nothing else (Cross Stick is another stroke type)");
+            expectEquals (proc.laneInfo (0, 0).articulation, 0);
+            expectEquals (proc.laneInfo (0, 0).bus, 0);
+            for (int b = 2; b <= 3; ++b) proc.getBus (false, b)->enable (true);
+            lanesReady (proc, 0, { 1, 2, 3 });
+            expectEquals (proc.getTotalNumOutputChannels(), 8);
+            auto h = hitAll (proc);
+            expectEquals ((int) h.size(), 8);
+            expectWithinAbsoluteError (h[0], 0.1f, 3e-3f);   // Main: Full Mix
+            expectWithinAbsoluteError (h[2], 0.2f, 3e-3f);   // Out 2: Kick In
+            expectWithinAbsoluteError (h[4], 0.3f, 3e-3f);   // Out 3: Kick Out
+            expectWithinAbsoluteError (h[6], 0.4f, 3e-3f);   // Out 4: Room
+        }
+        silenceOthers (proc);
+
+        beginTest ("project state keeps the lanes; a project saved before this feature opens with lanes off");
+        {
+            juce::MemoryBlock saved;
+            proc.getStateInformation (saved);
+            OpenTriggerProcessor p2;
+            p2.setPlayConfigDetails (2, 2, 44100.0, 512);
+            p2.setStateInformation (saved.getData(), (int) saved.getSize());
+            waitUntil ([&] { return slotReady (p2, 0); });
+            lanesReady (p2, 0, { 1, 2 });
+            expect (p2.laneInfo (0, 1).on && p2.laneInfo (0, 1).articulation == 1 && p2.laneInfo (0, 1).bus == 1);
+            expect (p2.laneInfo (0, 2).on && p2.laneInfo (0, 2).articulation == 2 && p2.laneInfo (0, 2).bus == 2);
+            expect (p2.laneInfo (0, 1).ready && p2.laneInfo (0, 2).ready, "lane content is rebuilt after loading");
+
+            // same state without the lane properties = a project from the previous version
+            auto xml = juce::AudioProcessor::getXmlFromBinary (saved.getData(), (int) saved.getSize());
+            auto vt = juce::ValueTree::fromXml (*xml);
+            for (int s = 1; s <= kSlots; ++s) vt.removeProperty ("lanes" + juce::String (s), nullptr);
+            juce::MemoryBlock old;
+            juce::AudioProcessor::copyXmlToBinary (*vt.createXml(), old);
+            OpenTriggerProcessor p3;
+            p3.setPlayConfigDetails (2, 2, 44100.0, 512);
+            p3.setStateInformation (old.getData(), (int) old.getSize());
+            waitUntil ([&] { return slotReady (p3, 0); });
+            for (int l = 1; l < kLanes; ++l) expect (! p3.laneInfo (0, l).on, "lane " + juce::String (l) + " off in an old project");
+            silenceOthers (p3);
+            expectWithinAbsoluteError (hitAll (p3)[0], 0.1f, 3e-3f);
+        }
+
+        beginTest ("loading another instrument into the slot resets its lanes; clearing the slot frees them");
+        {
+            proc.loadSlot (0, kit);
+            waitUntil ([&] { return slotReady (proc, 0); });
+            for (int l = 1; l < kLanes; ++l) expect (! proc.laneInfo (0, l).on, "lane " + juce::String (l) + " reset");
+            proc.splitMicsToOutputs (0, "Hit");
+            lanesReady (proc, 0, { 1 });
+            proc.clearSlot (0);
+            for (int l = 1; l < kLanes; ++l) expect (! proc.laneInfo (0, l).on && ! proc.laneInfo (0, l).ready);
+        }
+
+        beginTest ("hearing a slot from the editor plays every mic on Main; the Outputs panel works");
+        {
+            OpenTriggerProcessor p4;
+            p4.setPlayConfigDetails (2, 2, 44100.0, 512);
+            p4.prepareToPlay (44100.0, 512);
+            silenceOthers (p4);
+            loadAndWait (p4, 0, kit);
+            std::unique_ptr<juce::AudioProcessorEditor> ed (p4.createEditor());
+            auto* ui = static_cast<OpenTriggerEditor*> (ed.get());
+            ed->setSize (1280, 720);
+            ui->selectSlot (0);
+            auto& d = ui->detail();
+            expect (d.view() == SlotDetail::View::mics);
+            d.mouseDown (mouseAt (d, (float) d.viewTabRect (SlotDetail::View::outputs).getCentreX(), (float) d.viewTabRect (SlotDetail::View::outputs).getCentreY()));
+            expect (d.view() == SlotDetail::View::outputs, "OUTPUTS tab");
+            for (int l = 1; l < kLanes; ++l) expect (d.laneCell (l, 1).getBottom() <= d.getHeight(), "every lane row fits in the panel");
+            const auto split = d.splitButtonRect();
+            d.mouseDown (mouseAt (d, (float) split.getCentreX(), (float) split.getCentreY()));
+            expect (p4.laneInfo (0, 1).on && p4.laneInfo (0, 2).on && p4.laneInfo (0, 3).on, "split button fills the lanes");
+            // toggle lane 3 off and on with its check box
+            const auto cb = d.laneCell (3, 0);
+            d.mouseDown (mouseAt (d, (float) cb.getCentreX(), (float) cb.getCentreY()));
+            expect (! p4.laneInfo (0, 3).on);
+            d.mouseDown (mouseAt (d, (float) cb.getCentreX(), (float) cb.getCentreY()));
+            expect (p4.laneInfo (0, 3).on);
+            // level: drag to the middle of the bar is -6 dB; double click resets to 0
+            const auto lv = d.laneCell (1, 3);
+            d.mouseDown (mouseAt (d, (float) lv.getCentreX(), (float) lv.getCentreY()));
+            expectWithinAbsoluteError (p4.laneInfo (0, 1).gainDb, -6.0f, 0.6f);
+            d.mouseDoubleClick (mouseAt (d, (float) lv.getCentreX(), (float) lv.getCentreY()));
+            expectWithinAbsoluteError (p4.laneInfo (0, 1).gainDb, 0.0f, 1e-4f);
+            lanesReady (p4, 0, { 1, 2, 3 });
+            p4.auditionSlot (0, 100);
+            juce::AudioBuffer<float> io (2, 700);
+            io.clear();
+            juce::MidiBuffer m;
+            p4.processBlock (io, m);
+            expectWithinAbsoluteError (io.getSample (0, 300), 0.1f + 0.2f + 0.3f + 0.4f, 6e-3f);   // all the mics together
+            ed.reset();
+        }
+        root.deleteRecursively();
+    }
+};
+static LaneTests laneTests;
 } // namespace
 
 int main()

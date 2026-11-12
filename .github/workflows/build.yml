@@ -43,11 +43,16 @@ jobs:
         shell: bash
         run: cmake -B build -DOT_VERSION_LABEL="$VERSION" -DCMAKE_MSVC_RUNTIME_LIBRARY="MultiThreaded"
       - name: Build
-        run: cmake --build build --config Release --target OpenTrigger_VST3 OpenTrigger_Standalone --parallel
+        run: cmake --build build --config Release --target OpenTrigger_VST3 OpenTrigger_Standalone ot_tests --parallel
+      - name: Core tests
+        shell: bash
+        run: build/ot_tests_artefacts/Release/ot_tests.exe
       - name: Installer
         shell: bash
+        env:
+          MSYS_NO_PATHCONV: "1"
+          MSYS2_ARG_CONV_EXCL: "*"
         run: |
-          choco install innosetup -y --no-progress
           cd installer/windows
           "/c/Program Files (x86)/Inno Setup 6/ISCC.exe" "/DAppVersion=$VERSION" "/DArtefacts=$(cygpath -w "$GITHUB_WORKSPACE/build/OpenTrigger_artefacts/Release")" OpenTrigger.iss
       - uses: actions/upload-artifact@v4

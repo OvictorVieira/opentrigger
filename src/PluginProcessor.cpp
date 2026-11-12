@@ -66,7 +66,14 @@ juce::AudioProcessorValueTreeState::ParameterLayout OpenTriggerProcessor::create
 
 OpenTriggerProcessor::OpenTriggerProcessor()
     : AudioProcessor (BusesProperties().withInput ("Input", juce::AudioChannelSet::stereo(), true)
-                                       .withOutput ("Output", juce::AudioChannelSet::stereo(), true)),
+                                       .withOutput ("Output", juce::AudioChannelSet::stereo(), true)
+                                       .withOutput ("Out 2", juce::AudioChannelSet::stereo(), false)
+                                       .withOutput ("Out 3", juce::AudioChannelSet::stereo(), false)
+                                       .withOutput ("Out 4", juce::AudioChannelSet::stereo(), false)
+                                       .withOutput ("Out 5", juce::AudioChannelSet::stereo(), false)
+                                       .withOutput ("Out 6", juce::AudioChannelSet::stereo(), false)
+                                       .withOutput ("Out 7", juce::AudioChannelSet::stereo(), false)
+                                       .withOutput ("Out 8", juce::AudioChannelSet::stereo(), false)),
       apvts (*this, nullptr, "OPENTRIGGER", createLayout())
 {
     const char* gids[gCount] = { "mix", "gain", "threshold", "holdoff", "source", "inGain", "lowcut", "highcut", "gateOn",
@@ -94,6 +101,8 @@ bool OpenTriggerProcessor::isBusesLayoutSupported (const BusesLayout& l) const
 {
     const auto in = l.getMainInputChannelSet(), out = l.getMainOutputChannelSet();
     const auto mono = juce::AudioChannelSet::mono(), stereo = juce::AudioChannelSet::stereo();
+    for (int b = 1; b < l.outputBuses.size(); ++b)                      // the extra outputs are stereo or off
+        if (! l.outputBuses[b].isDisabled() && l.outputBuses[b] != stereo) return false;
     // stereo -> stereo, mono -> mono (Pro Tools keeps mono tracks mono), and mono -> stereo where the host allows it
     return (in == stereo && out == stereo) || (in == mono && out == mono) || (in == mono && out == stereo);
 }
@@ -123,8 +132,22 @@ TriggerEngine::Params OpenTriggerProcessor::snapshotParams() const
     p.sensitivity = gRaw[gSens]->load();
     p.detail = gRaw[gDetail]->load();
     p.midiNote = (int) gRaw[gMidiNote]->load() - 1; // 0 = any -> -1
+    p.mainChannels = std::max (1, getMainBusNumOutputChannels());
+    for (int b = 1; b < kBuses; ++b)
+    {
+        const auto* bus = getBus (false, b);
+        p.busChannel[(size_t) b] = (bus != nullptr && bus->isEnabled()) ? getChannelIndexInProcessBlockBuffer (false, b, 0) : -1;
+    }
     for (size_t s = 0; s < (size_t) kSlots; ++s)
     {
+        for (int ln = 0; ln < kLanes; ++ln)
+        {
+            const auto& c = laneCfg[s][(size_t) ln];
+            auto& lp = p.lane[s][(size_t) ln];
+            lp.bus = c.bus.load (std::memory_order_relaxed);
+            lp.gainDb = c.gainDb.load (std::memory_order_relaxed);
+            lp.on = ln == 0 || c.on.load (std::memory_order_relaxed);
+        }
         auto& sp = p.slot[s];
         sp.gainDb = slotRaw[0][s]->load();
         sp.pan = slotRaw[1][s]->load();
@@ -241,9 +264,10 @@ void OpenTriggerProcessor::setSlotArticulation (int slot, int a, bool auditionWh
     }
 }
 
-void OpenTriggerProcessor::loadSlot (int slot, const juce::File& file)
+void OpenTriggerProcessor::loadSlot (int slot, const juce::File& file, bool keepLanes)
 {
     if (slot < 0 || slot >= kSlots) return;
+    resetLanes (slot, keepLanes);
     auto& st = slotState[(size_t) slot];
     st.info = {};
     st.info.status = SlotStatus::loading;
@@ -273,6 +297,7 @@ void OpenTriggerProcessor::clearSlot (int slot)
     st.info = {};
     ++st.gen;
     st.building = false;
+    resetLanes (slot, false);
     engine.setSlotContent (slot, nullptr);
     slotsChanged.sendChangeMessage();
 }
@@ -320,10 +345,11 @@ void OpenTriggerProcessor::finishLoad (int slot, juce::uint64 gen, std::shared_p
     }
     slotsChanged.sendChangeMessage();
     syncArticulations(); // the parameter may have moved while we were decoding
+    syncLanes();         // extra mics wanted by the project (or by the user before this instrument finished loading)
 }
 
 void OpenTriggerProcessor::parameterChanged (const juce::String&, float) { triggerAsyncUpdate(); }
-void OpenTriggerProcessor::handleAsyncUpdate() { syncArticulations(); }
+void OpenTriggerProcessor::handleAsyncUpdate() { syncArticulations(); syncLanes(); }
 
 void OpenTriggerProcessor::syncArticulations()
 {
@@ -336,12 +362,170 @@ void OpenTriggerProcessor::syncArticulations()
     }
 }
 
+// ---------------------------------------------------------------------------------------------- mic lanes
+OpenTriggerProcessor::LaneInfo OpenTriggerProcessor::laneInfo (int slot, int lane) const
+{
+    LaneInfo i;
+    if (slot < 0 || slot >= kSlots || lane < 0 || lane >= kLanes) return i;
+    const auto& c = laneCfg[(size_t) slot][(size_t) lane];
+    i.on = lane == 0 || c.on.load();
+    i.articulation = lane == 0 ? slotArticulation (slot) : c.art.load();
+    i.bus = c.bus.load();
+    i.gainDb = c.gainDb.load();
+    i.ready = lane == 0 ? slotState[(size_t) slot].info.status == SlotStatus::ready
+                        : laneState[(size_t) slot][(size_t) lane].content != nullptr && ! laneState[(size_t) slot][(size_t) lane].building;
+    return i;
+}
+
+bool OpenTriggerProcessor::busEnabled (int bus) const
+{
+    if (bus <= 0) return true;
+    const auto* b = getBus (false, bus);
+    return b != nullptr && b->isEnabled();
+}
+
+void OpenTriggerProcessor::setLaneOn (int slot, int lane, bool on)
+{
+    if (slot < 0 || slot >= kSlots || lane < 1 || lane >= kLanes) return;
+    laneCfg[(size_t) slot][(size_t) lane].on = on;
+    syncLanes();
+    slotsChanged.sendChangeMessage();
+}
+
+void OpenTriggerProcessor::setLaneArticulation (int slot, int lane, int a)
+{
+    if (slot < 0 || slot >= kSlots || lane < 0 || lane >= kLanes) return;
+    if (lane == 0) { setSlotArticulation (slot, a); return; }
+    laneCfg[(size_t) slot][(size_t) lane].art = juce::jlimit (0, 63, a);
+    syncLanes();
+    slotsChanged.sendChangeMessage();
+}
+
+void OpenTriggerProcessor::setLaneBus (int slot, int lane, int bus)
+{
+    if (slot < 0 || slot >= kSlots || lane < 0 || lane >= kLanes) return;
+    laneCfg[(size_t) slot][(size_t) lane].bus = juce::jlimit (0, kBuses - 1, bus);
+    slotsChanged.sendChangeMessage();
+}
+
+void OpenTriggerProcessor::setLaneGain (int slot, int lane, float db)
+{
+    if (slot < 0 || slot >= kSlots || lane < 0 || lane >= kLanes) return;
+    laneCfg[(size_t) slot][(size_t) lane].gainDb = juce::jlimit (-24.0f, 12.0f, db);
+    slotsChanged.sendChangeMessage();
+}
+
+void OpenTriggerProcessor::splitMicsToOutputs (int slot, const juce::String& group)
+{
+    if (slot < 0 || slot >= kSlots) return;
+    const auto& st = slotState[(size_t) slot];
+    if (st.info.data == nullptr) return;
+    const auto& arts = st.info.data->meta.articulations;
+    const int lead = juce::jlimit (0, (int) arts.size() - 1, slotArticulation (slot));
+    int lane = 1;
+    for (int i = 0; i < (int) arts.size() && lane < kLanes; ++i)
+    {
+        const auto name = arts[(size_t) i].name;
+        const int sep = name.indexOf (" / ");
+        const auto g = sep < 0 ? juce::String() : name.substring (0, sep);
+        const auto label = sep < 0 ? name : name.substring (sep + 3);
+        if (g != group || i == lead || label == "Full Mix" || label.containsIgnoreCase ("Punch Boost")) continue;
+        auto& c = laneCfg[(size_t) slot][(size_t) lane];
+        c.art = i; c.bus = std::min (lane, kBuses - 1); c.gainDb = 0.0f; c.on = true;
+        ++lane;
+    }
+    for (; lane < kLanes; ++lane) laneCfg[(size_t) slot][(size_t) lane].on = false;
+    laneCfg[(size_t) slot][0].bus = 0;
+    syncLanes();
+    slotsChanged.sendChangeMessage();
+}
+
+void OpenTriggerProcessor::resetLanes (int slot, bool keepConfig)
+{
+    for (int ln = 1; ln < kLanes; ++ln)
+    {
+        auto& s = laneState[(size_t) slot][(size_t) ln];
+        ++s.gen;
+        s.content = nullptr; s.contentArt = -1; s.building = false;
+        engine.setLaneContent (slot, ln, nullptr);
+        if (! keepConfig)
+        {
+            auto& c = laneCfg[(size_t) slot][(size_t) ln];
+            c.on = false; c.art = 0; c.bus = 0; c.gainDb = 0.0f;
+        }
+    }
+    if (! keepConfig) { laneCfg[(size_t) slot][0].bus = 0; laneCfg[(size_t) slot][0].gainDb = 0.0f; }
+}
+
+void OpenTriggerProcessor::startLaneBuild (int slot, int lane)
+{
+    auto& st = slotState[(size_t) slot];
+    auto& ls = laneState[(size_t) slot][(size_t) lane];
+    if (st.info.data == nullptr) return;
+    const int art = juce::jlimit (0, (int) st.info.data->meta.articulations.size() - 1, laneCfg[(size_t) slot][(size_t) lane].art.load());
+    const auto gen = ++ls.gen;
+    ls.building = true;
+    auto data = st.info.data;
+    juce::WeakReference<OpenTriggerProcessor> weak (this);
+    pool.addJob ([weak, slot, lane, gen, data, art]
+    {
+        juce::String err;
+        auto content = buildSlotContent (data, art, err, 2);
+        juce::MessageManager::callAsync ([weak, slot, lane, gen, content]
+        {
+            auto* self = weak.get();
+            if (self == nullptr) return;
+            auto& s = self->laneState[(size_t) slot][(size_t) lane];
+            if (gen != s.gen) return;                // superseded
+            s.building = false;
+            if (content != nullptr)
+            {
+                s.contentArt = content->articulation;
+                s.content = content;
+                self->engine.setLaneContent (slot, lane, content);
+            }
+            self->slotsChanged.sendChangeMessage();
+            self->syncLanes();
+        });
+    });
+}
+
+void OpenTriggerProcessor::syncLanes()
+{
+    for (int s = 0; s < kSlots; ++s)
+    {
+        const auto& st = slotState[(size_t) s];
+        if (st.info.status != SlotStatus::ready || st.info.data == nullptr) continue;
+        for (int ln = 1; ln < kLanes; ++ln)
+        {
+            auto& ls = laneState[(size_t) s][(size_t) ln];
+            const auto& c = laneCfg[(size_t) s][(size_t) ln];
+            if (! c.on.load())
+            {
+                if (ls.content != nullptr || ls.building) { ++ls.gen; ls.content = nullptr; ls.contentArt = -1; ls.building = false; engine.setLaneContent (s, ln, nullptr); }
+                continue;
+            }
+            const int want = juce::jlimit (0, (int) st.info.data->meta.articulations.size() - 1, c.art.load());
+            if (! ls.building && (ls.content == nullptr || ls.contentArt != want)) startLaneBuild (s, ln);
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------------------------- state
 void OpenTriggerProcessor::getStateInformation (juce::MemoryBlock& dest)
 {
     auto state = apvts.copyState();
     for (int s = 0; s < kSlots; ++s)
+    {
         state.setProperty ("slot" + juce::String (s + 1), slotState[(size_t) s].info.file.getFullPathName(), nullptr);
+        juce::StringArray lanes;
+        for (int ln = 0; ln < kLanes; ++ln)
+        {
+            const auto& c = laneCfg[(size_t) s][(size_t) ln];
+            lanes.add (juce::String (ln == 0 || c.on.load() ? 1 : 0) + "," + juce::String (c.art.load()) + "," + juce::String (c.bus.load()) + "," + juce::String (c.gainDb.load(), 2));
+        }
+        state.setProperty ("lanes" + juce::String (s + 1), lanes.joinIntoString (";"), nullptr);
+    }
     if (auto xml = state.createXml()) copyXmlToBinary (*xml, dest);
 }
 
@@ -357,13 +541,25 @@ void OpenTriggerProcessor::setStateInformation (const void* data, int size)
     apvts.replaceState (state);
     for (int s = 0; s < kSlots; ++s)
     {
+        // mic lanes saved with the project (older projects have none: lanes stay off and everything plays on Main)
+        const auto saved = juce::StringArray::fromTokens (state.getProperty ("lanes" + juce::String (s + 1)).toString(), ";", "");
+        for (int ln = 0; ln < kLanes; ++ln)
+        {
+            auto& c = laneCfg[(size_t) s][(size_t) ln];
+            const auto f = ln < saved.size() ? juce::StringArray::fromTokens (saved[ln], ",", "") : juce::StringArray();
+            c.on = ln > 0 && f.size() == 4 && f[0].getIntValue() != 0;
+            c.art = f.size() == 4 ? juce::jlimit (0, 63, f[1].getIntValue()) : 0;
+            c.bus = f.size() == 4 ? juce::jlimit (0, kBuses - 1, f[2].getIntValue()) : 0;
+            c.gainDb = f.size() == 4 ? juce::jlimit (-24.0f, 12.0f, f[3].getFloatValue()) : 0.0f;
+        }
         const auto cur = slotState[(size_t) s].info;
         if (files[s].existsAsFile())
         {
-            if (cur.file != files[s] || cur.status == SlotStatus::failed) loadSlot (s, files[s]);
+            if (cur.file != files[s] || cur.status == SlotStatus::failed) loadSlot (s, files[s], true);
         }
         else if (cur.status != SlotStatus::empty) clearSlot (s); // missing file: keep running silent
     }
+    syncLanes();
 }
 
 juce::AudioProcessorEditor* OpenTriggerProcessor::createEditor() { return new OpenTriggerEditor (*this); }

@@ -13,9 +13,20 @@ Status: beta (`0.1.0-beta.1`). macOS and Windows installers are published on the
 - Smart Trigger: listens to a stretch of the track and proposes the detection settings; nothing changes until you apply it.
 - Stroke Type menu: choose how the piece is hit (Hit, Cross Stick, ...) and a VeloSplit type that switches style by velocity.
 - Instrument browser with pictures, library filter, hear-before-you-load preview.
+- Multi-output: one instance can play several mics of the same hit (Kick In, Kick Out, Room, ...) and send each to its own
+  output, so each goes to its own track in the DAW without duplicating the plug-in. Seven extra stereo outputs ("Out 2" to
+  "Out 8"); every mic of a hit uses the same velocity layer and take, so their phase stays as recorded.
 - Own instrument format, `.otci` (FLAC audio, cover image, velocity layers, round robins, several mic positions).
 - Protected packs: `.otpack` bundles instruments with the audio encrypted (XChaCha20-Poly1305), checksum and tamper
   checks on import. See "Protected audio" below.
+
+## Multi-output
+
+In the slot panel choose **OUTPUTS**: each row is a mic lane (lane 1 is the slot's own mic), with its output (Main, Out 2 ...
+Out 8) and level. **Split mics to outputs** puts every mic of the chosen stroke type on its own output. Enable the extra
+outputs in the DAW: in REAPER give the track more channels (for example 16), open the plug-in's routing (pin connector)
+and map Out 2, Out 3 ... to track channels, then create the sends or child tracks. An output the DAW has not enabled
+plays on Main, so nothing goes silent. Outputs carry only the sampled sound (no dry signal) at the Output Volume.
 
 ## Instrument libraries
 

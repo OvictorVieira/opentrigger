@@ -224,7 +224,7 @@ void TriggerEngine::prepare (double sampleRate, int blockSize)
 {
     sr = sampleRate;
     maxBlock = std::max (blockSize, 64);
-    wet.setSize (2, maxBlock, false, true, false);
+    wet.setSize (2 * kBuses, maxBlock, false, true, false);
     aud.setSize (2, maxBlock, false, true, false);
     rng.setSeedRandomly(); // instances must not share one round-robin sequence
     latency = kLatency;
@@ -255,26 +255,29 @@ void TriggerEngine::reset()
     delayPos = 0;
 }
 
-void TriggerEngine::setSlotContent (int slot, std::shared_ptr<SlotContent> content)
+void TriggerEngine::setSlotContent (int slot, std::shared_ptr<SlotContent> content) { setLaneContent (slot, 0, std::move (content)); }
+
+void TriggerEngine::setLaneContent (int slot, int lane, std::shared_ptr<SlotContent> content)
 {
-    if (slot < 0 || slot >= kSlots) return;
+    if (slot < 0 || slot >= kSlots || lane < 0 || lane >= kLanes) return;
+    const auto idx = (size_t) (slot * kLanes + lane);
     std::shared_ptr<SlotContent> dropped;
     {
         const juce::SpinLock::ScopedLockType sl (lock);
-        dropped = std::move (pendingSlots[(size_t) slot]); // unconsumed older request, or the parked old content
-        pendingSlots[(size_t) slot] = std::move (content);
-        pendingMask |= 1u << slot;
+        dropped = std::move (pendingSlots[idx]); // unconsumed older request, or the parked old content
+        pendingSlots[idx] = std::move (content);
+        pendingMask |= juce::uint64 (1) << idx;
     }
     // `dropped` is destroyed here, outside the lock and off the audio thread.
 }
 
 void TriggerEngine::releaseParked()
 {
-    std::array<std::shared_ptr<SlotContent>, kSlots> drop;
+    std::array<std::shared_ptr<SlotContent>, kContents> drop;
     {
         const juce::SpinLock::ScopedLockType sl (lock);
-        for (int i = 0; i < kSlots; ++i)
-            if (! (pendingMask & (1u << i))) drop[(size_t) i] = std::move (pendingSlots[(size_t) i]); // only parked (already swapped out) entries
+        for (int i = 0; i < kContents; ++i)
+            if (! (pendingMask & (juce::uint64 (1) << i))) drop[(size_t) i] = std::move (pendingSlots[(size_t) i]); // only parked (already swapped out) entries
     }
     // `drop` is destroyed here, outside the lock.
     const auto now = juce::Time::getMillisecondCounter();
@@ -324,12 +327,13 @@ void TriggerEngine::adoptPending()
     if (! tl.isLocked()) return;
     if (pendingMask != 0)
     {
-        for (int i = 0; i < kSlots; ++i)
-            if (pendingMask & (1u << i))
+        for (int i = 0; i < kContents; ++i)
+            if (pendingMask & (juce::uint64 (1) << i))
             {
                 std::swap (slots[(size_t) i], pendingSlots[(size_t) i]); // old content parks in pendingSlots
-                for (auto& v : voices) if (v.slot == i) v = {};
-                for (auto& v : auditionVoices) if (v.slot == i) v = {};
+                const int sl = i / kLanes, ln = i % kLanes;
+                for (auto& v : voices) if (v.slot == sl && v.lane == ln) v = {};
+                for (auto& v : auditionVoices) if (v.slot == sl && v.lane == ln) v = {};
             }
         pendingMask = 0;
     }
@@ -348,7 +352,7 @@ void TriggerEngine::adoptPending()
     }
 }
 
-void TriggerEngine::startVoice (std::array<Voice, kVoices>& pool, const SlotContent& c, int slot, int waveIdx, float gain, const SlotParams& sp, int delay)
+void TriggerEngine::startVoice (std::array<Voice, kVoices>& pool, const SlotContent& c, int slot, int lane, int bus, int waveIdx, float gain, const SlotParams& sp, int delay)
 {
     if (waveIdx < 0 || waveIdx >= (int) c.audio.size() || c.audio[(size_t) waveIdx].getNumSamples() < 2) return;
     Voice* v = nullptr;
@@ -366,14 +370,24 @@ void TriggerEngine::startVoice (std::array<Voice, kVoices>& pool, const SlotCont
     v->gL = g * std::cos (theta) * juce::MathConstants<float>::sqrt2;
     v->gR = g * std::sin (theta) * juce::MathConstants<float>::sqrt2;
     v->slot = slot;
+    v->lane = lane;
+    v->bus = bus;
     v->delay = delay;
     v->started = ++clock;
 }
 
-void TriggerEngine::triggerSlot (int slot, int velocity, const SlotParams& sp, bool audition, int delay)
+void TriggerEngine::triggerSlot (int slot, int velocity, const Params& p, bool audition, int delay)
 {
-    auto& c = slots[(size_t) slot];
+    auto& c = slots[(size_t) (slot * kLanes)];
     if (c == nullptr || velocity < 1) return;
+    const auto& sp = p.slot[(size_t) slot];
+    const auto& lp = p.lane[(size_t) slot];
+    // an unavailable output (not enabled by the host) plays on Main; auditions always play on Main
+    auto busOf = [&] (int lane)
+    {
+        const int b = lp[(size_t) lane].bus;
+        return (! audition && b > 0 && b < kBuses && p.busChannel[(size_t) b] >= 0) ? b : 0;
+    };
     const auto& art = c->art();
     float gain = 1.0f;
     const auto* layer = otci::pickLayer (art, velocity, gain);
@@ -387,28 +401,47 @@ void TriggerEngine::triggerSlot (int slot, int velocity, const SlotParams& sp, b
     if (takes > 1 && last < 0) pick = rng.nextInt (takes);  // first hit: any take
     else if (takes > 1) { pick = rng.nextInt (takes - 1); if (pick >= last) ++pick; }
     last = pick;
+    auto& pool = audition ? auditionVoices : voices;
+    const float laneGain0 = juce::Decibels::decibelsToGain (lp[0].gainDb);
     for (int idx : layer->roundRobins[(size_t) pick])
-        startVoice (audition ? auditionVoices : voices, *c, slot, idx, gain, sp, delay);
+        startVoice (pool, *c, slot, 0, busOf (0), idx, gain * laneGain0, sp, delay);
+
+    // Extra mics of the same hit: same velocity and the same take number, so every mic hears the same strike and the
+    // phase between them is the one that was recorded.
+    for (int lane = 1; lane < kLanes; ++lane)
+    {
+        auto& e = slots[(size_t) (slot * kLanes + lane)];
+        if (e == nullptr || ! lp[(size_t) lane].on) continue;
+        float g2 = 1.0f;
+        const auto* l2 = otci::pickLayer (e->art(), velocity, g2);
+        if (l2 == nullptr || l2->roundRobins.empty()) continue;
+        const int take2 = pick % (int) l2->roundRobins.size();
+        const float lg = juce::Decibels::decibelsToGain (lp[(size_t) lane].gainDb);
+        for (int idx : l2->roundRobins[(size_t) take2])
+            startVoice (pool, *e, slot, lane, busOf (lane), idx, g2 * lg, sp, delay);
+    }
     if (! audition) tel.hits[slot].fetch_add (1, std::memory_order_relaxed);
 }
 
 void TriggerEngine::fire (int velocity, const Params& p, int delay)
 {
     bool anySolo = false;
-    for (int i = 0; i < kSlots; ++i) anySolo = anySolo || (slots[(size_t) i] != nullptr && p.slot[(size_t) i].solo);
+    for (int i = 0; i < kSlots; ++i) anySolo = anySolo || (slots[(size_t) (i * kLanes)] != nullptr && p.slot[(size_t) i].solo);
     for (int i = 0; i < kSlots; ++i)
     {
-        if (slots[(size_t) i] == nullptr) continue;
+        if (slots[(size_t) (i * kLanes)] == nullptr) continue;
         const auto& sp = p.slot[(size_t) i];
         if (anySolo ? ! sp.solo : sp.mute) continue;
-        triggerSlot (i, velocity, sp, false, delay);
+        triggerSlot (i, velocity, p, false, delay);
     }
     colTrig = std::max (colTrig, velocity);
 }
 
-void TriggerEngine::renderVoice (Voice& v, float* l, float* r, int n)
+void TriggerEngine::renderVoice (Voice& v, const BusOut& o, int n)
 {
     if (v.buf == nullptr) return;
+    float* l = o.l[v.bus] != nullptr ? o.l[v.bus] : o.l[0];
+    float* r = o.r[v.bus] != nullptr ? o.r[v.bus] : o.r[0];
     const int len = v.buf->getNumSamples();
     const float* a = v.buf->getReadPointer (0);
     const float* b = v.buf->getNumChannels() > 1 ? v.buf->getReadPointer (1) : a;
@@ -425,9 +458,9 @@ void TriggerEngine::renderVoice (Voice& v, float* l, float* r, int n)
 }
 
 template <size_t N>
-void TriggerEngine::renderVoices (std::array<Voice, N>& pool, float* l, float* r, int n)
+void TriggerEngine::renderVoices (std::array<Voice, N>& pool, const BusOut& o, int n)
 {
-    for (auto& v : pool) renderVoice (v, l, r, n);
+    for (auto& v : pool) renderVoice (v, o, n);
 }
 
 void TriggerEngine::updateFilters (const Params& p)
@@ -451,7 +484,7 @@ void TriggerEngine::process (juce::AudioBuffer<float>& io, juce::MidiBuffer& mid
     adoptPending();
 
     const int total = io.getNumSamples();
-    const int nch = io.getNumChannels();
+    const int nch = p.mainChannels > 0 ? std::min (p.mainChannels, io.getNumChannels()) : io.getNumChannels();
     if (nch == 0) return;
 
     updateFilters (p);
@@ -470,16 +503,17 @@ void TriggerEngine::process (juce::AudioBuffer<float>& io, juce::MidiBuffer& mid
     const int gHold = (int) (p.gateHoldMs * 0.001 * sr);
     const float wetGain = juce::Decibels::decibelsToGain (p.outGainDb) * p.mix;
     const float dryGain = 1.0f - p.mix;
+    const float auxGain = juce::Decibels::decibelsToGain (p.outGainDb);
     const bool useAudio = p.source != midiOnly, useMidi = p.source != audioOnly;
     float inPk[2] = { 0.0f, 0.0f };
 
     // Hits requested from the editor (click on a slot image).
     for (int i = 0; i < kSlots; ++i)
-        if (const int v = auditionRequest[(size_t) i].exchange (0); v > 0 && slots[(size_t) i] != nullptr)
+        if (const int v = auditionRequest[(size_t) i].exchange (0); v > 0 && slots[(size_t) (i * kLanes)] != nullptr)
         {
-            auto sp = p.slot[(size_t) i];
-            sp.mute = false;
-            triggerSlot (i, v, sp, true, 0);
+            auto q = p;
+            q.slot[(size_t) i].mute = false;
+            triggerSlot (i, v, q, true, 0);
         }
 
     auto midiIt = midi.begin();
@@ -489,13 +523,19 @@ void TriggerEngine::process (juce::AudioBuffer<float>& io, juce::MidiBuffer& mid
         wet.clear (0, n);
         float* wl = wet.getWritePointer (0);
         float* wr = wet.getWritePointer (1);
+        auto busOut = [&] (int offset)
+        {
+            BusOut o;
+            for (int b = 0; b < kBuses; ++b) { o.l[b] = wet.getWritePointer (2 * b) + offset; o.r[b] = wet.getWritePointer (2 * b + 1) + offset; }
+            return o;
+        };
         float* io0 = io.getWritePointer (0) + start;
         float* io1 = nch > 1 ? io.getWritePointer (1) + start : nullptr;
 
         int done = 0;
         auto fireAt = [&] (int at)
         {
-            if (at > done) { renderVoices (voices, wl + done, wr + done, at - done); done = at; }
+            if (at > done) { renderVoices (voices, busOut (done), at - done); done = at; }
         };
         for (int i = 0; i < n; ++i)
         {
@@ -592,13 +632,24 @@ void TriggerEngine::process (juce::AudioBuffer<float>& io, juce::MidiBuffer& mid
         fireAt (n);
 
         aud.clear (0, n);
-        renderVoices (auditionVoices, aud.getWritePointer (0), aud.getWritePointer (1), n);
+        { BusOut ao; ao.l[0] = aud.getWritePointer (0); ao.r[0] = aud.getWritePointer (1); renderVoices (auditionVoices, ao, n); }
         for (int ch = 0; ch < nch; ++ch)
         {
             float* out = io.getWritePointer (ch) + start;
             const float* w = ch == 0 ? wl : wr;
             const float* a = aud.getReadPointer (ch == 0 ? 0 : 1);
             for (int i = 0; i < n; ++i) out[i] = out[i] * dryGain + w[i] * wetGain + a[i];
+        }
+        // Auxiliary outputs carry only the sampled sound (no dry signal), at the output volume.
+        for (int b = 1; b < kBuses; ++b)
+        {
+            const int c0 = p.busChannel[(size_t) b];
+            if (c0 < 0 || c0 + 1 >= io.getNumChannels()) continue;
+            float* ol = io.getWritePointer (c0) + start;
+            float* orr = io.getWritePointer (c0 + 1) + start;
+            const float* sl = wet.getReadPointer (2 * b);
+            const float* sr_ = wet.getReadPointer (2 * b + 1);
+            for (int i = 0; i < n; ++i) { ol[i] = sl[i] * auxGain; orr[i] = sr_[i] * auxGain; }
         }
     }
 
@@ -607,7 +658,7 @@ void TriggerEngine::process (juce::AudioBuffer<float>& io, juce::MidiBuffer& mid
     {
         const int n = std::min (maxBlock, total - start);
         wet.clear (0, n);
-        renderVoice (previewVoice, wet.getWritePointer (0), wet.getWritePointer (1), n);
+        { BusOut po; po.l[0] = wet.getWritePointer (0); po.r[0] = wet.getWritePointer (1); renderVoice (previewVoice, po, n); }
         for (int ch = 0; ch < nch; ++ch)
             juce::FloatVectorOperations::add (io.getWritePointer (ch) + start, wet.getReadPointer (ch == 0 ? 0 : 1), n);
     }

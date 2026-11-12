@@ -55,11 +55,20 @@ public:
     void paint (juce::Graphics&) override;
     void resized() override;
     void mouseDown (const juce::MouseEvent&) override;
+    void mouseDrag (const juce::MouseEvent&) override;
+    void mouseDoubleClick (const juce::MouseEvent&) override;
     int chipCount() const { return (int) chips.size(); }
     // Stroke Type menu (shown when the piece has more than one playing style, e.g. Hit / Cross Stick / VeloSplit).
     bool strokeMode() const { return groups.size() > 1; }
     const std::vector<juce::String>& strokeTypes() const { return groups; }
     juce::String strokeType() const { return activeGroup; }
+    // MICS: pick the slot's mic. OUTPUTS: send several mics of the same hit to separate outputs of the plug-in.
+    enum class View { mics, outputs };
+    View view() const { return viewMode; }
+    void setView (View v) { viewMode = v; layoutChips(); repaint(); }
+    juce::Rectangle<int> viewTabRect (View v) const { return v == View::mics ? tabMics : tabOuts; }
+    juce::Rectangle<int> laneCell (int lane, int col) const;   // col: 0 on, 1 mic, 2 output, 3 level
+    juce::Rectangle<int> splitButtonRect() const { return splitBtn; }
     juce::Rectangle<int> strokeBoxRect() const { return strokeBox; }
     void selectStroke (const juce::String& group);   // switches to that style (same mic if it has it) and plays it
     juce::Rectangle<int> chipRect (int i) const { return chips[(size_t) i]; }
@@ -67,6 +76,12 @@ public:
 private:
     void timerCallback() override;
     void layoutChips();
+    void showMicMenu (int lane);
+    void showBusMenu (int lane);
+    void setLevelFromX (int lane, int x);
+    View viewMode = View::mics;
+    juce::Rectangle<int> tabMics, tabOuts, splitBtn;
+    int dragLane = -1;
     OpenTriggerProcessor& proc;
     int slot = 0, shownArt = -1;
     OpenTriggerProcessor::SlotInfo info;

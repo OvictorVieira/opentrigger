@@ -42,7 +42,22 @@ public:
         juce::String error;
     };
     SlotInfo slotInfo (int slot) const { return slotState[(size_t) slot].info; }
-    void loadSlot (int slot, const juce::File&);
+    void loadSlot (int slot, const juce::File&, bool keepLanes = false);
+
+    // ---- mic lanes and outputs (message thread) ----
+    // Each slot can play several mics of the same hit at once (lane 0 is the slot's own mic, set with setSlotArticulation).
+    // Every lane goes to an output: 0 = Main, 1..7 = auxiliary outputs ("Out 2".."Out 8") the DAW can route to other tracks.
+    struct LaneInfo { bool on = false, ready = false; int articulation = 0, bus = 0; float gainDb = 0.0f; };
+    LaneInfo laneInfo (int slot, int lane) const;
+    void setLaneOn (int slot, int lane, bool on);                 // lanes 1.. only (lane 0 is always on)
+    void setLaneArticulation (int slot, int lane, int articulation);
+    void setLaneBus (int slot, int lane, int bus);
+    void setLaneGain (int slot, int lane, float gainDb);
+    // Puts every mic of one stroke type (e.g. "Hit") on its own lane and output: lane 0 stays where it is, the other mics
+    // go to Out 2, Out 3... Mic names come from the instrument ("Hit / Kick In" -> group "Hit").
+    void splitMicsToOutputs (int slot, const juce::String& group);
+    bool busEnabled (int bus) const;                              // is that output enabled in the host?
+    static juce::String busName (int bus) { return bus <= 0 ? juce::String ("Main") : "Out " + juce::String (bus + 1); }
     void clearSlot (int slot);
     // Drives the s<N>_art parameter (0..63) and starts decoding that mic right away; with auditionWhenReady the slot plays
     // one hit the moment the new mic is in.
@@ -71,6 +86,9 @@ private:
     void parameterChanged (const juce::String&, float) override;
     void handleAsyncUpdate() override;
     void syncArticulations();
+    void syncLanes();
+    void startLaneBuild (int slot, int lane);
+    void resetLanes (int slot, bool keepConfig);
     void startBuild (int slot, std::shared_ptr<const InstrumentData>, int articulation, bool fromFile, juce::File file);
     void finishLoad (int slot, juce::uint64 gen, std::shared_ptr<InstrumentData>, std::shared_ptr<SlotContent>, juce::String error, juce::File file);
     TriggerEngine::Params snapshotParams() const;
@@ -83,6 +101,10 @@ private:
     };
     double sampleRateNow = 44100.0;
     std::array<SlotState, kSlots> slotState;
+    struct LaneCfg { std::atomic<int> art { 0 }, bus { 0 }; std::atomic<float> gainDb { 0.0f }; std::atomic<bool> on { false }; };
+    struct LaneState { std::shared_ptr<const SlotContent> content; int contentArt = -1; bool building = false; juce::uint64 gen = 0; };
+    std::array<std::array<LaneCfg, kLanes>, kSlots> laneCfg;
+    std::array<std::array<LaneState, kLanes>, kSlots> laneState;
     std::array<bool, kSlots> auditionAfterBuild {};
     TriggerEngine engine;
     std::atomic<float>* raw (const juce::String& id) const { return apvts.getRawParameterValue (id); }

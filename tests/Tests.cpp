@@ -855,6 +855,180 @@ struct VeloSplitTests : juce::UnitTest
     }
 };
 static VeloSplitTests veloSplitTests;
+
+struct LaneEngineTests : juce::UnitTest
+{
+    LaneEngineTests() : juce::UnitTest ("Mic lanes in the engine", "OpenTrigger") {}
+
+    // "Close" 0.1 / take A 0.2, B 0.25; "Room" 0.3 / take A 0.4, B 0.45 (both: a soft layer from velocity 0, a loud one from 64)
+    static std::shared_ptr<InstrumentData> kit (const juce::File& f, juce::String& err)
+    {
+        otci::Instrument k;
+        k.name = "K"; k.library = "L";
+        k.waves = { makeWave (0.1f), makeWave (0.2f), makeWave (0.25f), makeWave (0.3f), makeWave (0.4f), makeWave (0.45f), makeWave (0.6f) };
+        otci::Articulation close, room, sub;
+        close.name = "Hit / Close"; close.layers = { { 0, 1.0f, 1.0f, { { 0 } } }, { 64, 1.0f, 1.0f, { { 1 }, { 2 } } } };
+        room.name = "Hit / Room";   room.layers = { { 0, 1.0f, 1.0f, { { 3 } } }, { 64, 1.0f, 1.0f, { { 4 }, { 5 } } } };
+        sub.name = "Hit / Sub";     sub.layers = { { 0, 1.0f, 1.0f, { { 6 } } } };                        // one layer, one take
+        k.articulations = { close, room, sub };
+        if (! otci::write (f, k, err)) return nullptr;
+        return readInstrumentData (f, err);
+    }
+    static juce::AudioBuffer<float> run (TriggerEngine& e, const TriggerEngine::Params& p, int vel, int channels = 4)
+    {
+        e.reset();
+        const int L = e.latencySamples();
+        juce::AudioBuffer<float> io (channels, L + 256);
+        io.clear();
+        juce::MidiBuffer m;
+        m.addEvent (juce::MidiMessage::noteOn (1, 60, (juce::uint8) vel), 0);
+        e.process (io, m, p);
+        return io;
+    }
+
+    void runTest() override
+    {
+        auto dir = juce::File::getSpecialLocation (juce::File::tempDirectory).getChildFile ("ot_lane_eng_" + juce::String::toHexString (juce::Random::getSystemRandom().nextInt64()));
+        dir.createDirectory();
+        juce::String err;
+        auto data = kit (dir.getChildFile ("k.otci"), err);
+        expect (data != nullptr, err);
+        if (! data) return;
+        auto content = [&] (int art) { auto c = buildSlotContent (data, art, err); expect (c != nullptr, err); return c; };
+        TriggerEngine eng;
+        eng.prepare (44100.0, 512);
+        eng.setLaneContent (0, 0, content (0));
+        eng.setLaneContent (0, 1, content (1));
+        TriggerEngine::Params p;
+        p.source = TriggerEngine::midiOnly;
+        p.mainChannels = 2;
+        p.busChannel[1] = 2;
+        p.lane[0][1].bus = 1;
+        const int L = eng.latencySamples();
+        auto at = [&] (const juce::AudioBuffer<float>& b, int ch) { return b.getSample (ch, L + 100); };
+
+        beginTest ("each lane plays on its own output; Main holds lane 0 only");
+        {
+            auto b = run (eng, p, 30);
+            expectWithinAbsoluteError (at (b, 0), 0.1f, 1e-3f);
+            expectWithinAbsoluteError (at (b, 1), 0.1f, 1e-3f);
+            expectWithinAbsoluteError (at (b, 2), 0.3f, 1e-3f);
+            expectWithinAbsoluteError (at (b, 3), 0.3f, 1e-3f);
+        }
+
+        beginTest ("all mics of one hit use the same take: Close take A always pairs with Room take A (phase-coherent)");
+        {
+            int a = 0, bcount = 0;
+            for (int i = 0; i < 80; ++i)
+            {
+                auto b = run (eng, p, 100);
+                const float close = at (b, 0), room = at (b, 2);
+                const bool takeA = std::abs (close - 0.2f) < 2e-3f && std::abs (room - 0.4f) < 2e-3f;
+                const bool takeB = std::abs (close - 0.25f) < 2e-3f && std::abs (room - 0.45f) < 2e-3f;
+                expect (takeA || takeB, "mismatched takes: close " + juce::String (close) + " room " + juce::String (room));
+                a += takeA; bcount += takeB;
+            }
+            expect (a > 10 && bcount > 10, "both takes get used (a=" + juce::String (a) + " b=" + juce::String (bcount) + ")");
+        }
+
+        beginTest ("a lane whose mic has fewer takes follows the same take index (modulo) and its own velocity layer");
+        {
+            eng.setLaneContent (0, 1, content (2));         // Sub: one layer, one take
+            auto b = run (eng, p, 100);
+            expectWithinAbsoluteError (at (b, 2), 0.6f, 1e-3f);
+            eng.setLaneContent (0, 1, content (1));
+        }
+
+        beginTest ("an output the host has not enabled falls back to Main, and the lane is summed there");
+        {
+            auto q = p;
+            q.busChannel[1] = -1;
+            auto b = run (eng, q, 30, 2);
+            expectWithinAbsoluteError (at (b, 0), 0.1f + 0.3f, 1e-3f);
+        }
+
+        beginTest ("lane level, lane off, lane removed");
+        {
+            auto q = p;
+            q.lane[0][1].gainDb = -6.0206f;
+            expectWithinAbsoluteError (at (run (eng, q, 30), 2), 0.15f, 1e-3f);
+            q.lane[0][1].gainDb = 0.0f;
+            q.lane[0][1].on = false;
+            { auto b = run (eng, q, 30); expectWithinAbsoluteError (at (b, 0), 0.1f, 1e-3f); expectWithinAbsoluteError (at (b, 2), 0.0f, 1e-5f); }
+            eng.setLaneContent (0, 1, nullptr);
+            { auto b = run (eng, p, 30); expectWithinAbsoluteError (at (b, 0), 0.1f, 1e-3f); expectWithinAbsoluteError (at (b, 2), 0.0f, 1e-5f); }
+            eng.setLaneContent (0, 1, content (1));
+        }
+
+        beginTest ("outputs carry the sampled sound only: Mix and the dry input do not leak into them, output volume does");
+        {
+            auto q = p;
+            q.mix = 0.0f;                                   // Main = dry only
+            q.outGainDb = 6.0206f;
+            juce::AudioBuffer<float> io (4, L + 256);
+            io.clear();
+            for (int ch = 0; ch < 2; ++ch) juce::FloatVectorOperations::fill (io.getWritePointer (ch), 0.05f, io.getNumSamples());
+            for (int ch = 2; ch < 4; ++ch) juce::FloatVectorOperations::fill (io.getWritePointer (ch), 0.9f, io.getNumSamples());  // stale host data
+            juce::MidiBuffer m;
+            m.addEvent (juce::MidiMessage::noteOn (1, 60, (juce::uint8) 30), 0);
+            eng.reset();
+            eng.process (io, m, q);
+            expectWithinAbsoluteError (at (io, 0), 0.05f, 1e-3f);          // dry untouched
+            expectWithinAbsoluteError (at (io, 2), 0.3f * 2.0f, 2e-3f);    // output: Room x output volume, stale data overwritten
+        }
+
+        beginTest ("hearing a slot (audition) always plays every mic on Main");
+        {
+            eng.reset();
+            eng.auditionSlot (0, 30);
+            juce::AudioBuffer<float> io (4, 700);
+            io.clear();
+            juce::MidiBuffer m;
+            eng.process (io, m, p);
+            expectWithinAbsoluteError (io.getSample (0, 300), 0.1f + 0.3f, 1e-3f);
+            expectWithinAbsoluteError (io.getSample (2, 300), 0.0f, 1e-5f);
+        }
+
+        beginTest ("mono main bus: aux outputs still land on their own channels");
+        {
+            auto q = p;
+            q.mainChannels = 1;
+            q.busChannel[1] = 1;                          // host gives main = channel 0, Out 2 = channels 1-2
+            auto b = run (eng, q, 30, 3);
+            expectWithinAbsoluteError (at (b, 0), 0.1f, 1e-3f);
+            expectWithinAbsoluteError (at (b, 1), 0.3f, 1e-3f);
+            expectWithinAbsoluteError (at (b, 2), 0.3f, 1e-3f);
+        }
+
+        beginTest ("six lanes on seven outputs under a fast roll: no crash, finite output, every output heard");
+        {
+            for (int ln = 1; ln < kLanes; ++ln) eng.setLaneContent (0, ln, content (ln % 3));
+            auto q = p;
+            for (int b = 1; b < kBuses; ++b) q.busChannel[(size_t) b] = 2 * b;
+            for (int ln = 1; ln < kLanes; ++ln) q.lane[0][(size_t) ln].bus = ln;
+            eng.reset();
+            juce::Random rnd (7);
+            bool finite = true;
+            std::vector<float> peak (kBuses, 0.0f);
+            for (int blk = 0; blk < 200; ++blk)
+            {
+                juce::AudioBuffer<float> io (2 * kBuses, 512);
+                io.clear();
+                juce::MidiBuffer m;
+                for (int k = 0; k < 4; ++k) m.addEvent (juce::MidiMessage::noteOn (1, 60, (juce::uint8) (1 + rnd.nextInt (127))), rnd.nextInt (512));
+                eng.process (io, m, q);
+                for (int c = 0; c < io.getNumChannels(); ++c)
+                    for (int i = 0; i < 512; ++i) { const float v = io.getSample (c, i); finite = finite && std::isfinite (v); peak[(size_t) (c / 2)] = std::max (peak[(size_t) (c / 2)], std::abs (v)); }
+            }
+            expect (finite, "finite output");
+            for (int b = 0; b < kLanes; ++b) expect (peak[(size_t) b] > 0.05f, "output " + juce::String (b) + " heard");
+            expect (peak[7] == 0.0f, "unused output stays silent");
+        }
+        dir.deleteRecursively();
+    }
+};
+static LaneEngineTests laneEngineTests;
+
 static SmartTests smartTests;
 static DraftTests draftTests;
 static OtciTests otciTests;

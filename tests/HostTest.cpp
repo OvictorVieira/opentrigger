@@ -30,6 +30,39 @@ juce::File makeKit (const juce::File& dir)
     return f;
 }
 
+
+juce::File makeMicKit (const juce::File& dir)
+{
+    otci::Instrument inst;
+    inst.name = "Host Mics"; inst.library = "T";
+    for (float v : { 0.1f, 0.5f })
+    {
+        juce::AudioBuffer<float> b (1, 4000);
+        for (int i = 0; i < 4000; ++i) b.setSample (0, i, v);
+        otci::Wave w; w.flac = encodeFlac (b, 44100.0, 24); w.frames = 4000; w.channels = 1; w.rate = 44100.0;
+        inst.waves.push_back (std::move (w));
+    }
+    const char* names[] = { "Hit / Full Mix", "Hit / Kick In" };
+    for (int i = 0; i < 2; ++i)
+    {
+        otci::Articulation a; a.name = names[i];
+        a.layers = { { 0, 1.0f, 1.0f, { { i } } } };
+        inst.articulations.push_back (a);
+    }
+    auto f = dir.getChildFile ("hostmics.otci");
+    juce::String err;
+    otci::write (f, inst, err);
+    return f;
+}
+
+// A host starts with the main output only and adds extra outputs when the user routes them. Some hosted formats report
+// every output as enabled at first, so tests switch the extras off to get the layout a normal track has.
+void mainOutputOnly (juce::AudioPluginInstance& p)
+{
+    for (int b = 1; b < p.getBusCount (false); ++b)
+        if (auto* bus = p.getBus (false, b)) bus->enable (false);
+}
+
 // Instruments load on a worker thread and land via the message loop, like in a real host.
 void pumpMs (int ms)
 {
@@ -56,13 +89,15 @@ struct HostTests : juce::UnitTest
             for (int block : { 1, 64, 512, 4096 })
             {
                 juce::String err;
-                std::unique_ptr<juce::AudioPluginInstance> p (mgr.createPluginInstance (*found[0], sr, block, err).release());
+                std::unique_ptr<juce::AudioPluginInstance> p (mgr.createPluginInstance (*found[0], sr, block, err).release()); if (p) mainOutputOnly (*p);
                 expect (p != nullptr, label + " create failed: " + err);
                 if (! p) return;
+                { static bool once = false; if (! once) { once = true; juce::String q = label + " layout: out buses=" + juce::String (p->getBusCount (false)) + " totalIn=" + juce::String (p->getTotalNumInputChannels()) + " totalOut=" + juce::String (p->getTotalNumOutputChannels()) + " enabled:";
+                  for (int b = 0; b < p->getBusCount (false); ++b) q << " " << (int) p->getBus (false, b)->isEnabled() << "/" << p->getBus (false, b)->getNumberOfChannels(); logMessage (q); } }
                 p->setPlayConfigDetails (2, 2, sr, block);
                 p->prepareToPlay (sr, block);
                 // no instrument: silence out for silent in, MIDI must not crash
-                juce::AudioBuffer<float> io (2, block);
+                juce::AudioBuffer<float> io (std::max (2, p->getTotalNumOutputChannels()), block);
                 io.clear();
                 juce::MidiBuffer m;
                 m.addEvent (juce::MidiMessage::noteOn (1, 36, (juce::uint8) 100), 0);
@@ -73,7 +108,7 @@ struct HostTests : juce::UnitTest
 
         beginTest (label + ": state with an instrument restores it and MIDI plays the right layer");
         juce::String err;
-        std::unique_ptr<juce::AudioPluginInstance> a (mgr.createPluginInstance (*found[0], 48000.0, 512, err).release());
+        std::unique_ptr<juce::AudioPluginInstance> a (mgr.createPluginInstance (*found[0], 48000.0, 512, err).release()); if (a) mainOutputOnly (*a);
         expect (a != nullptr, err);
         if (! a) return;
         // Build a state blob by letting the plugin's own state format carry our instrument path.
@@ -124,7 +159,7 @@ struct HostTests : juce::UnitTest
         {
             // fresh instance per hit: hosts do not reset plugin voices on repeated prepareToPlay
             juce::String e2;
-            std::unique_ptr<juce::AudioPluginInstance> inst (mgr.createPluginInstance (*found[0], 48000.0, 512, e2).release());
+            std::unique_ptr<juce::AudioPluginInstance> inst (mgr.createPluginInstance (*found[0], 48000.0, 512, e2).release()); if (inst) mainOutputOnly (*inst);
             inst->setStateInformation (st2.getData(), (int) st2.getSize());
             inst->setPlayConfigDetails (2, 2, 48000.0, 512);
             inst->prepareToPlay (48000.0, 512);
@@ -134,9 +169,10 @@ struct HostTests : juce::UnitTest
             // like a real host: blocks never exceed the size given to prepareToPlay (512)
             const int blocks = (lat + 1024 + 511) / 512;
             juce::AudioBuffer<float> out (2, blocks * 512);
+            const int hostCh = std::max (2, inst->getTotalNumOutputChannels());
             for (int b = 0; b < blocks; ++b)
             {
-                juce::AudioBuffer<float> io (2, 512);
+                juce::AudioBuffer<float> io (hostCh, 512);
                 io.clear();
                 juce::MidiBuffer mm;
                 if (b == 0) mm.addEvent (juce::MidiMessage::noteOn (1, note, (juce::uint8) vel), sampleOffset);
@@ -154,6 +190,48 @@ struct HostTests : juce::UnitTest
         expectEquals (late.getSample (0, hostLatency + 299), 0.0f);
         expect (late.getSample (0, hostLatency + 305) > 0.4f);
 
+        beginTest (label + ": multi-output: the extra output carries its own mic, Main keeps the other, as a host sees it");
+        {
+            auto micKit = makeMicKit (g_lib).getFullPathName();
+            innerXml->setAttribute ("slot1", micKit);
+            innerXml->setAttribute ("lanes1", "1,0,0,0.00;1,1,1,0.00;0,0,0,0.00;0,0,0,0.00;0,0,0,0.00;0,0,0,0.00");
+            juce::MemoryBlock innerMics;
+            juce::AudioProcessor::copyXmlToBinary (*innerXml, innerMics);
+            comp->deleteAllTextElements();
+            comp->addTextElement (innerMics.toBase64Encoding());
+            juce::MemoryBlock st4;
+            juce::AudioProcessor::copyXmlToBinary (*xml, st4);
+
+            juce::String e4;
+            std::unique_ptr<juce::AudioPluginInstance> inst (mgr.createPluginInstance (*found[0], 48000.0, 512, e4).release()); if (inst) mainOutputOnly (*inst);
+            expect (inst != nullptr, e4);
+            if (inst)
+            {
+                expectEquals (inst->getBusCount (false), 8);
+                expect (inst->getBus (false, 1) != nullptr && ! inst->getBus (false, 1)->isEnabled(), "Out 2 starts disabled");
+                expect (inst->getBus (false, 1)->enable (true), "host can enable Out 2");
+                inst->setStateInformation (st4.getData(), (int) st4.getSize());
+                inst->prepareToPlay (48000.0, 512);                       // layout comes from the enabled buses, as in a host
+                expectEquals (inst->getTotalNumOutputChannels(), 4);
+                pumpMs (900);
+                const int lat = inst->getLatencySamples();
+                const int blocks = (lat + 1024 + 511) / 512;
+                juce::AudioBuffer<float> out (4, blocks * 512);
+                for (int bl = 0; bl < blocks; ++bl)
+                {
+                    juce::AudioBuffer<float> io (4, 512);
+                    io.clear();
+                    juce::MidiBuffer mm;
+                    if (bl == 0) mm.addEvent (juce::MidiMessage::noteOn (1, 36, (juce::uint8) 100), 0);
+                    inst->processBlock (io, mm);
+                    for (int c = 0; c < 4; ++c) out.copyFrom (c, bl * 512, io, c, 0, 512);
+                }
+                expectWithinAbsoluteError (out.getSample (0, lat + 200), 0.1f, 6e-3f);   // Main: Full Mix
+                expectWithinAbsoluteError (out.getSample (2, lat + 200), 0.5f, 6e-3f);   // Out 2: Kick In
+                expectWithinAbsoluteError (out.getSample (3, lat + 200), 0.5f, 6e-3f);
+            }
+        }
+
         beginTest (label + ": parameters exist, are automatable and survive a state round trip");
         auto& params = a->getParameters();
         expectEquals ((int) params.size(), 73); // 16 global + 8 slots x 7 + the host's Bypass
@@ -161,7 +239,7 @@ struct HostTests : juce::UnitTest
         params[0]->setValueNotifyingHost (0.3f);
         juce::MemoryBlock s3;
         a->getStateInformation (s3);
-        std::unique_ptr<juce::AudioPluginInstance> b (mgr.createPluginInstance (*found[0], 48000.0, 512, err).release());
+        std::unique_ptr<juce::AudioPluginInstance> b (mgr.createPluginInstance (*found[0], 48000.0, 512, err).release()); if (b) mainOutputOnly (*b);
         b->setStateInformation (s3.getData(), (int) s3.getSize());
         expectWithinAbsoluteError (b->getParameters()[0]->getValue(), 0.3f, 1e-3f);
 
@@ -177,7 +255,7 @@ struct HostTests : juce::UnitTest
         juce::Random r (7);
         for (int blk = 0; blk < 400; ++blk)
         {
-            juce::AudioBuffer<float> io (2, 64 + r.nextInt (900));
+            juce::AudioBuffer<float> io (std::max (2, a->getTotalNumOutputChannels()), 64 + r.nextInt (900));
             for (int c = 0; c < 2; ++c) for (int i = 0; i < io.getNumSamples(); ++i) io.setSample (c, i, r.nextFloat() * 2.0f - 1.0f);
             juce::MidiBuffer mm;
             for (int k = 0; k < r.nextInt (6); ++k)
@@ -197,7 +275,7 @@ struct HostTests : juce::UnitTest
         juce::Random r (3);
         for (int blk = 0; blk < 200; ++blk)
         {
-            juce::AudioBuffer<float> io (2, 32 + r.nextInt (900));
+            juce::AudioBuffer<float> io (std::max (2, a.getTotalNumOutputChannels()), 32 + r.nextInt (900));
             for (int c = 0; c < 2; ++c) for (int i = 0; i < io.getNumSamples(); ++i) io.setSample (c, i, r.nextFloat() * 2.0f - 1.0f);
             juce::MidiBuffer mm;
             mm.addEvent (juce::MidiMessage::noteOn (1, 36, (juce::uint8) 100), 0);
