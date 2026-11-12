@@ -141,7 +141,7 @@ std::shared_ptr<SlotContent> buildSlotContent (std::shared_ptr<const InstrumentD
             juce::MemoryBlock blob;
             juce::String derr;
             const bool ok = in.openedOk() && w.size > 0 && in.setPosition (w.offset)
-                            && in.readIntoMemoryBlock (blob, (ssize_t) w.size) == (size_t) w.size
+                            && in.readIntoMemoryBlock (blob, (juce::int64) w.size) == (size_t) w.size
                             && (! encrypted || otci::decryptBlob (c->data->meta.enc, packKey, idx, blob, derr))
                             && decodeFlacBlob (blob, c->audio[(size_t) idx], c->rate[(size_t) idx]); // each wave writes its own slot
             if (! ok)
@@ -187,7 +187,7 @@ PreviewSound buildPreview (std::shared_ptr<const InstrumentData> data, int veloc
         juce::MemoryBlock blob;
         juce::AudioBuffer<float> b;
         double rate = 44100.0;
-        if (w.size <= 0 || ! in.setPosition (w.offset) || in.readIntoMemoryBlock (blob, (ssize_t) w.size) != (size_t) w.size
+        if (w.size <= 0 || ! in.setPosition (w.offset) || in.readIntoMemoryBlock (blob, (juce::int64) w.size) != (size_t) w.size
             || (encrypted && ! otci::decryptBlob (data->meta.enc, packKey, idx, blob, error))
             || ! decodeFlacBlob (blob, b, rate))
         { if (error.isEmpty()) error = "cannot decode preview"; return out; }

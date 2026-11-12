@@ -189,7 +189,7 @@ std::optional<Instrument> read (const juce::File& f, bool audio, juce::String& e
         if (audio)
         {
             in.setPosition (kHeaderSize + offs[(size_t) i]);
-            in.readIntoMemoryBlock (w.flac, (ssize_t) len);
+            in.readIntoMemoryBlock (w.flac, (juce::int64) len);
         }
         inst.waves.push_back (std::move (w));
     }
@@ -200,7 +200,7 @@ std::optional<Instrument> read (const juce::File& f, bool audio, juce::String& e
         if (sz > 0 && imgOff + sz <= psize)
         {
             in.setPosition (kHeaderSize + imgOff);
-            in.readIntoMemoryBlock (inst.image, (ssize_t) sz);
+            in.readIntoMemoryBlock (inst.image, (juce::int64) sz);
         }
     }
 
