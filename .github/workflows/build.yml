@@ -18,7 +18,7 @@ jobs:
       - uses: actions/checkout@v4
       - name: Version
         run: echo "VERSION=${{ github.event.inputs.version || github.ref_name }}" | sed 's/=v/=/' >> "$GITHUB_ENV"
-      - name: Configure (universal: Intel + Apple silicon)
+      - name: Configure universal build (Intel + Apple silicon)
         run: cmake -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_OSX_ARCHITECTURES="arm64;x86_64" -DOT_VERSION_LABEL="$VERSION"
       - name: Build
         run: cmake --build build --config Release --target OpenTrigger_VST3 OpenTrigger_AU OpenTrigger_Standalone ot_tests --parallel
