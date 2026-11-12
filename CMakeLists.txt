@@ -12,7 +12,16 @@ FetchContent_Declare(juce
     GIT_SHALLOW ON)
 FetchContent_MakeAvailable(juce)
 
-find_package(ZLIB REQUIRED)
+if(WIN32)
+    # no system zlib on Windows: build the reference one
+    FetchContent_Declare(zlib GIT_REPOSITORY https://github.com/madler/zlib.git GIT_TAG v1.3.1 GIT_SHALLOW ON)
+    set(ZLIB_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
+    FetchContent_MakeAvailable(zlib)
+    target_include_directories(zlibstatic PUBLIC ${zlib_SOURCE_DIR} ${zlib_BINARY_DIR})
+    add_library(ZLIB::ZLIB ALIAS zlibstatic)
+else()
+    find_package(ZLIB REQUIRED)
+endif()
 
 # Format + engine, no GUI: shared by the plugin and the tests.
 add_library(ot_core STATIC src/third_party/monocypher/monocypher.c src/Crypt.cpp src/Otci.cpp src/Pack.cpp src/Engine.cpp src/Library.cpp src/Draft.cpp src/SmartTrigger.cpp)
