@@ -1,0 +1,14 @@
+#!/bin/bash
+# Runs as root after installation. Best effort: never fails the install.
+for p in "/Library/Audio/Plug-Ins/VST3/OpenTrigger.vst3" "/Library/Audio/Plug-Ins/Components/OpenTrigger.component" "/Applications/OpenTrigger.app"; do
+    [ -e "$p" ] && xattr -cr "$p" 2>/dev/null
+done
+USER_NAME="$(stat -f%Su /dev/console 2>/dev/null)"
+if [ -n "$USER_NAME" ] && [ "$USER_NAME" != "root" ]; then
+    HOME_DIR="$(dscl . -read "/Users/$USER_NAME" NFSHomeDirectory 2>/dev/null | awk '{print $2}')"
+    if [ -n "$HOME_DIR" ]; then
+        sudo -u "$USER_NAME" mkdir -p "$HOME_DIR/Documents/OpenTrigger/Library" 2>/dev/null
+    fi
+fi
+killall -9 AudioComponentRegistrar 2>/dev/null
+exit 0

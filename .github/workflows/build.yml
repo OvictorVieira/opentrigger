@@ -1,0 +1,70 @@
+name: Build installers
+permissions:
+  contents: write
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version label, e.g. 0.1.0-beta.1"
+        required: true
+        default: "0.1.0-beta.1"
+  push:
+    tags: ["v*"]
+
+jobs:
+  macos:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - name: Version
+        run: echo "VERSION=${{ github.event.inputs.version || github.ref_name }}" | sed 's/=v/=/' >> "$GITHUB_ENV"
+      - name: Configure (universal: Intel + Apple silicon)
+        run: cmake -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_OSX_ARCHITECTURES="arm64;x86_64" -DOT_VERSION_LABEL="$VERSION"
+      - name: Build
+        run: cmake --build build --config Release --target OpenTrigger_VST3 OpenTrigger_AU OpenTrigger_Standalone ot_tests --parallel
+      - name: Core tests
+        run: build/ot_tests_artefacts/Release/ot_tests
+      - name: Ad-hoc sign
+        run: |
+          for b in build/OpenTrigger_artefacts/Release/VST3/OpenTrigger.vst3 build/OpenTrigger_artefacts/Release/AU/OpenTrigger.component build/OpenTrigger_artefacts/Release/Standalone/OpenTrigger.app; do codesign --force --deep -s - "$b"; done
+      - name: Package
+        run: installer/mac/build_pkg.sh "$VERSION" build/OpenTrigger_artefacts/Release dist
+      - uses: actions/upload-artifact@v4
+        with: { name: OpenTrigger-macOS, path: dist/*.pkg }
+
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Version
+        shell: bash
+        run: echo "VERSION=$(echo '${{ github.event.inputs.version || github.ref_name }}' | sed 's/^v//')" >> "$GITHUB_ENV"
+      - name: Configure
+        shell: bash
+        run: cmake -B build -DOT_VERSION_LABEL="$VERSION" -DCMAKE_MSVC_RUNTIME_LIBRARY="MultiThreaded"
+      - name: Build
+        run: cmake --build build --config Release --target OpenTrigger_VST3 OpenTrigger_Standalone --parallel
+      - name: Installer
+        shell: bash
+        run: |
+          choco install innosetup -y --no-progress
+          cd installer/windows
+          "/c/Program Files (x86)/Inno Setup 6/ISCC.exe" "/DAppVersion=$VERSION" "/DArtefacts=$(cygpath -w "$GITHUB_WORKSPACE/build/OpenTrigger_artefacts/Release")" OpenTrigger.iss
+      - uses: actions/upload-artifact@v4
+        with: { name: OpenTrigger-Windows, path: installer/windows/output/*.exe }
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [macos, windows]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with: { path: artifacts, merge-multiple: true }
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${{ github.ref_name }}" --repo "${{ github.repository }}" --prerelease \
+            --title "OpenTrigger ${{ github.ref_name }}" \
+            --notes "Beta. Installers for macOS (.pkg, Intel + Apple silicon, ad-hoc signed, not notarized) and Windows (.exe). No sample libraries are included." \
+            artifacts/*

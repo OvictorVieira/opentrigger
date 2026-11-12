@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="utf-8"?>
+<installer-gui-script minSpecVersion="2">
+    <title>OpenTrigger @VERSION@</title>
+    <options customize="allow" require-scripts="false" hostArchitectures="x86_64,arm64"/>
+    <domains enable_anywhere="false" enable_currentUserHome="false" enable_localSystem="true"/>
+    <choices-outline>
+        <line choice="vst3"/>
+        <line choice="au"/>
+        <line choice="app"/>
+    </choices-outline>
+    <choice id="vst3" title="VST3 plug-in" description="For REAPER, Cubase, Ableton Live, Bitwig and other VST3 hosts. Installs to /Library/Audio/Plug-Ins/VST3.">
+        <pkg-ref id="com.opentrigger.vst3"/>
+    </choice>
+    <choice id="au" title="Audio Unit plug-in" description="For Logic Pro, GarageBand and other Audio Unit hosts. Installs to /Library/Audio/Plug-Ins/Components.">
+        <pkg-ref id="com.opentrigger.au"/>
+    </choice>
+    <choice id="app" title="Standalone app" description="OpenTrigger as an application, and creates your library folder in Documents/OpenTrigger/Library.">
+        <pkg-ref id="com.opentrigger.app"/>
+    </choice>
+    <pkg-ref id="com.opentrigger.vst3" version="@VERSION@" onConclusion="none">vst3.pkg</pkg-ref>
+    <pkg-ref id="com.opentrigger.au" version="@VERSION@" onConclusion="none">au.pkg</pkg-ref>
+    <pkg-ref id="com.opentrigger.app" version="@VERSION@" onConclusion="none">app.pkg</pkg-ref>
+</installer-gui-script>
