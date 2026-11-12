@@ -1000,12 +1000,43 @@ struct LaneEngineTests : juce::UnitTest
             expectWithinAbsoluteError (at (b, 2), 0.3f, 1e-3f);
         }
 
-        beginTest ("six lanes on seven outputs under a fast roll: no crash, finite output, every output heard");
+
+        beginTest ("lane pan, polarity, mute, solo and bottom-of-fader silence act on that mic only");
         {
-            for (int ln = 1; ln < kLanes; ++ln) eng.setLaneContent (0, ln, content (ln % 3));
+            auto q = p;
+            q.lane[0][1].pan = 1.0f;                                          // Room hard right
+            { auto b = run (eng, q, 30); expectWithinAbsoluteError (b.getSample (0, L + 100), 0.1f, 1e-3f); }
+            q.mainChannels = 2; q.busChannel[1] = -1;                          // everything on Main to read both channels
+            { auto b = run (eng, q, 30, 2); expectWithinAbsoluteError (at (b, 0), 0.1f, 1e-3f); expectWithinAbsoluteError (at (b, 1), 0.1f + 0.3f * 1.4142f, 2e-3f); }
+            q = p; q.busChannel[1] = -1; q.lane[0][1].phase = true;
+            expectWithinAbsoluteError (at (run (eng, q, 30, 2), 0), 0.1f - 0.3f, 1e-3f);
+            q = p; q.busChannel[1] = -1; q.lane[0][1].mute = true;
+            expectWithinAbsoluteError (at (run (eng, q, 30, 2), 0), 0.1f, 1e-3f);
+            q = p; q.busChannel[1] = -1; q.lane[0][1].solo = true;             // solo: lane 0 stops, only the soloed mic plays
+            expectWithinAbsoluteError (at (run (eng, q, 30, 2), 0), 0.3f, 1e-3f);
+            q = p; q.busChannel[1] = -1; q.lane[0][0].gainDb = -60.0f;         // lane 0 at the bottom: silent, the others stay
+            expectWithinAbsoluteError (at (run (eng, q, 30, 2), 0), 0.3f, 1e-3f);
+        }
+
+        beginTest ("twelve lanes: every one of them can play");
+        {
+            for (int ln = 0; ln < kLanes; ++ln) eng.setLaneContent (0, ln, content (ln % 3));
+            auto q = p;
+            for (int ln = 1; ln < kLanes; ++ln) q.lane[0][(size_t) ln].bus = 0;
+            q.busChannel[1] = -1;
+            auto b = run (eng, q, 30, 2);
+            float expected = 0.0f;
+            for (int ln = 0; ln < kLanes; ++ln) expected += std::array<float, 3> { 0.1f, 0.3f, 0.6f }[(size_t) (ln % 3)];
+            expectWithinAbsoluteError (at (b, 0), expected, 4e-3f);
+            for (int ln = 2; ln < kLanes; ++ln) eng.setLaneContent (0, ln, nullptr);
+        }
+
+        beginTest ("seven lanes on seven outputs under a fast roll: no crash, finite output, every output heard");
+        {
+            for (int ln = 1; ln < kLanes; ++ln) eng.setLaneContent (0, ln, ln < kBuses ? content (ln % 3) : nullptr);
             auto q = p;
             for (int b = 1; b < kBuses; ++b) q.busChannel[(size_t) b] = 2 * b;
-            for (int ln = 1; ln < kLanes; ++ln) q.lane[0][(size_t) ln].bus = ln;
+            for (int ln = 1; ln < kBuses; ++ln) q.lane[0][(size_t) ln].bus = ln;
             eng.reset();
             juce::Random rnd (7);
             bool finite = true;
@@ -1021,8 +1052,7 @@ struct LaneEngineTests : juce::UnitTest
                     for (int i = 0; i < 512; ++i) { const float v = io.getSample (c, i); finite = finite && std::isfinite (v); peak[(size_t) (c / 2)] = std::max (peak[(size_t) (c / 2)], std::abs (v)); }
             }
             expect (finite, "finite output");
-            for (int b = 0; b < kLanes; ++b) expect (peak[(size_t) b] > 0.05f, "output " + juce::String (b) + " heard");
-            expect (peak[7] == 0.0f, "unused output stays silent");
+            for (int b = 0; b < kBuses; ++b) expect (peak[(size_t) b] > 0.05f, "output " + juce::String (b) + " heard");
         }
         dir.deleteRecursively();
     }

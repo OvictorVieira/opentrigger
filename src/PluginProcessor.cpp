@@ -146,6 +146,10 @@ TriggerEngine::Params OpenTriggerProcessor::snapshotParams() const
             auto& lp = p.lane[s][(size_t) ln];
             lp.bus = c.bus.load (std::memory_order_relaxed);
             lp.gainDb = c.gainDb.load (std::memory_order_relaxed);
+            lp.pan = c.pan.load (std::memory_order_relaxed);
+            lp.mute = c.mute.load (std::memory_order_relaxed);
+            lp.solo = c.solo.load (std::memory_order_relaxed);
+            lp.phase = c.phase.load (std::memory_order_relaxed);
             lp.on = ln == 0 || c.on.load (std::memory_order_relaxed);
         }
         auto& sp = p.slot[s];
@@ -372,6 +376,7 @@ OpenTriggerProcessor::LaneInfo OpenTriggerProcessor::laneInfo (int slot, int lan
     i.articulation = lane == 0 ? slotArticulation (slot) : c.art.load();
     i.bus = c.bus.load();
     i.gainDb = c.gainDb.load();
+    i.pan = c.pan.load(); i.mute = c.mute.load(); i.solo = c.solo.load(); i.phase = c.phase.load();
     i.ready = lane == 0 ? slotState[(size_t) slot].info.status == SlotStatus::ready
                         : laneState[(size_t) slot][(size_t) lane].content != nullptr && ! laneState[(size_t) slot][(size_t) lane].building;
     return i;
@@ -411,8 +416,113 @@ void OpenTriggerProcessor::setLaneBus (int slot, int lane, int bus)
 void OpenTriggerProcessor::setLaneGain (int slot, int lane, float db)
 {
     if (slot < 0 || slot >= kSlots || lane < 0 || lane >= kLanes) return;
-    laneCfg[(size_t) slot][(size_t) lane].gainDb = juce::jlimit (-24.0f, 12.0f, db);
+    laneCfg[(size_t) slot][(size_t) lane].gainDb = juce::jlimit (-60.0f, 12.0f, db);
     slotsChanged.sendChangeMessage();
+}
+
+void OpenTriggerProcessor::setLanePan (int slot, int lane, float pan)
+{
+    if (slot < 0 || slot >= kSlots || lane < 0 || lane >= kLanes) return;
+    laneCfg[(size_t) slot][(size_t) lane].pan = juce::jlimit (-1.0f, 1.0f, pan);
+    slotsChanged.sendChangeMessage();
+}
+void OpenTriggerProcessor::setLaneMute (int slot, int lane, bool on) { if (slot >= 0 && slot < kSlots && lane >= 0 && lane < kLanes) { laneCfg[(size_t) slot][(size_t) lane].mute = on; slotsChanged.sendChangeMessage(); } }
+void OpenTriggerProcessor::setLaneSolo (int slot, int lane, bool on) { if (slot >= 0 && slot < kSlots && lane >= 0 && lane < kLanes) { laneCfg[(size_t) slot][(size_t) lane].solo = on; slotsChanged.sendChangeMessage(); } }
+void OpenTriggerProcessor::setLanePhase (int slot, int lane, bool on) { if (slot >= 0 && slot < kSlots && lane >= 0 && lane < kLanes) { laneCfg[(size_t) slot][(size_t) lane].phase = on; slotsChanged.sendChangeMessage(); } }
+
+int OpenTriggerProcessor::laneOfArticulation (int slot, int art) const
+{
+    if (slot < 0 || slot >= kSlots) return -1;
+    if (slotArticulation (slot) == art) return 0;
+    for (int ln = 1; ln < kLanes; ++ln)
+        if (laneCfg[(size_t) slot][(size_t) ln].on.load() && laneCfg[(size_t) slot][(size_t) ln].art.load() == art) return ln;
+    return -1;
+}
+
+bool OpenTriggerProcessor::setMicLevel (int slot, int art, float db)
+{
+    if (slot < 0 || slot >= kSlots) return false;
+    db = juce::jlimit (-60.0f, 12.0f, db);
+    int ln = laneOfArticulation (slot, art);
+    if (ln == 0) { setLaneGain (slot, 0, db); return true; }
+    if (ln < 0)
+    {
+        if (db <= kLaneOffDb) return true;                           // already off
+        for (int k = 1; k < kLanes && ln < 0; ++k) if (! laneCfg[(size_t) slot][(size_t) k].on.load()) ln = k;
+        if (ln < 0) return false;                                    // every lane is taken
+        auto& c = laneCfg[(size_t) slot][(size_t) ln];
+        c.art = art; c.bus = 0; c.pan = 0.0f; c.mute = false; c.solo = false; c.phase = false;
+        c.gainDb = db; c.on = true;
+        syncLanes();
+        slotsChanged.sendChangeMessage();
+        return true;
+    }
+    if (db <= kLaneOffDb)
+    {
+        auto& c = laneCfg[(size_t) slot][(size_t) ln];
+        c.on = false; c.gainDb = 0.0f; c.pan = 0.0f; c.mute = false; c.solo = false; c.phase = false; c.bus = 0;
+        syncLanes();
+    }
+    else setLaneGain (slot, ln, db);
+    slotsChanged.sendChangeMessage();
+    return true;
+}
+
+void OpenTriggerProcessor::resetMixer (int slot)
+{
+    if (slot < 0 || slot >= kSlots) return;
+    for (int ln = 0; ln < kLanes; ++ln)
+    {
+        auto& c = laneCfg[(size_t) slot][(size_t) ln];
+        if (ln > 0) c.on = false;
+        c.gainDb = 0.0f; c.pan = 0.0f; c.mute = false; c.solo = false; c.phase = false; c.bus = 0;
+    }
+    syncLanes();
+    slotsChanged.sendChangeMessage();
+}
+
+void OpenTriggerProcessor::calibrateMixed (int slot, const juce::String& group)
+{
+    if (slot < 0 || slot >= kSlots) return;
+    const auto data = slotState[(size_t) slot].info.data;
+    if (data == nullptr) return;
+    const auto& arts = data->meta.articulations;
+    const auto fullName = group.isEmpty() ? juce::String ("Full Mix") : group + " / Full Mix";
+    int full = -1;
+    std::vector<int> mics;
+    for (int i = 0; i < (int) arts.size(); ++i)
+    {
+        const auto& n = arts[(size_t) i].name;
+        const int sep = n.indexOf (" / ");
+        const auto g = sep < 0 ? juce::String() : n.substring (0, sep);
+        const auto label = sep < 0 ? n : n.substring (sep + 3);
+        if (g != group) continue;
+        if (n == fullName) full = i;
+        else if (! label.containsIgnoreCase ("Punch Boost") && (int) mics.size() < kLanes - 1) mics.push_back (i);
+    }
+    if (full < 0 || mics.empty()) { mixerNote = "This stroke type has no Full Mix and separate mics to compare."; slotsChanged.sendChangeMessage(); return; }
+    mixerNote = "Calibrating...";
+    slotsChanged.sendChangeMessage();
+    setSlotArticulation (slot, full);                                // lane 0 = the Full Mix
+    juce::WeakReference<OpenTriggerProcessor> weak (this);
+    pool.addJob ([weak, slot, data, full, mics]
+    {
+        juce::String err;
+        float trim = 0.0f;
+        const bool ok = calibrateMixTrim (data, full, mics, trim, err);
+        juce::MessageManager::callAsync ([weak, slot, mics, ok, trim, err]
+        {
+            auto* self = weak.get();
+            if (self == nullptr) return;
+            const float db = ok ? trim : -3.1f;                      // measured, or the nominal -3 dB the Full Mix is built with
+            for (int ln = 1; ln < kLanes; ++ln) self->laneCfg[(size_t) slot][(size_t) ln].on = false;
+            for (int a : mics) self->setMicLevel (slot, a, db);
+            self->setLaneGain (slot, 0, -60.0f);                     // the Full Mix stays loaded, silent
+            self->mixerNote = ok ? "Mics set so that together they sound like the Mixed sound (" + juce::String (db, 1) + " dB each)."
+                                 : "Could not measure (" + err + "); used " + juce::String (db, 1) + " dB each.";
+            self->slotsChanged.sendChangeMessage();
+        });
+    });
 }
 
 void OpenTriggerProcessor::splitMicsToOutputs (int slot, const juce::String& group)
@@ -451,10 +561,10 @@ void OpenTriggerProcessor::resetLanes (int slot, bool keepConfig)
         if (! keepConfig)
         {
             auto& c = laneCfg[(size_t) slot][(size_t) ln];
-            c.on = false; c.art = 0; c.bus = 0; c.gainDb = 0.0f;
+            c.on = false; c.art = 0; c.bus = 0; c.gainDb = 0.0f; c.pan = 0.0f; c.mute = false; c.solo = false; c.phase = false;
         }
     }
-    if (! keepConfig) { laneCfg[(size_t) slot][0].bus = 0; laneCfg[(size_t) slot][0].gainDb = 0.0f; }
+    if (! keepConfig) { auto& c0 = laneCfg[(size_t) slot][0]; c0.bus = 0; c0.gainDb = 0.0f; c0.pan = 0.0f; c0.mute = false; c0.solo = false; c0.phase = false; }
 }
 
 void OpenTriggerProcessor::startLaneBuild (int slot, int lane)
@@ -522,7 +632,8 @@ void OpenTriggerProcessor::getStateInformation (juce::MemoryBlock& dest)
         for (int ln = 0; ln < kLanes; ++ln)
         {
             const auto& c = laneCfg[(size_t) s][(size_t) ln];
-            lanes.add (juce::String (ln == 0 || c.on.load() ? 1 : 0) + "," + juce::String (c.art.load()) + "," + juce::String (c.bus.load()) + "," + juce::String (c.gainDb.load(), 2));
+            lanes.add (juce::String (ln == 0 || c.on.load() ? 1 : 0) + "," + juce::String (c.art.load()) + "," + juce::String (c.bus.load()) + "," + juce::String (c.gainDb.load(), 2)
+                       + "," + juce::String (c.pan.load(), 3) + "," + juce::String (c.mute.load() ? 1 : 0) + "," + juce::String (c.solo.load() ? 1 : 0) + "," + juce::String (c.phase.load() ? 1 : 0));
         }
         state.setProperty ("lanes" + juce::String (s + 1), lanes.joinIntoString (";"), nullptr);
     }
@@ -547,10 +658,15 @@ void OpenTriggerProcessor::setStateInformation (const void* data, int size)
         {
             auto& c = laneCfg[(size_t) s][(size_t) ln];
             const auto f = ln < saved.size() ? juce::StringArray::fromTokens (saved[ln], ",", "") : juce::StringArray();
-            c.on = ln > 0 && f.size() == 4 && f[0].getIntValue() != 0;
-            c.art = f.size() == 4 ? juce::jlimit (0, 63, f[1].getIntValue()) : 0;
-            c.bus = f.size() == 4 ? juce::jlimit (0, kBuses - 1, f[2].getIntValue()) : 0;
-            c.gainDb = f.size() == 4 ? juce::jlimit (-24.0f, 12.0f, f[3].getFloatValue()) : 0.0f;
+            const bool have = f.size() == 4 || f.size() == 8;           // 4 fields: projects from the first beta
+            c.on = ln > 0 && have && f[0].getIntValue() != 0;
+            c.art = have ? juce::jlimit (0, 63, f[1].getIntValue()) : 0;
+            c.bus = have ? juce::jlimit (0, kBuses - 1, f[2].getIntValue()) : 0;
+            c.gainDb = have ? juce::jlimit (-60.0f, 12.0f, f[3].getFloatValue()) : 0.0f;
+            c.pan = f.size() == 8 ? juce::jlimit (-1.0f, 1.0f, f[4].getFloatValue()) : 0.0f;
+            c.mute = f.size() == 8 && f[5].getIntValue() != 0;
+            c.solo = f.size() == 8 && f[6].getIntValue() != 0;
+            c.phase = f.size() == 8 && f[7].getIntValue() != 0;
         }
         const auto cur = slotState[(size_t) s].info;
         if (files[s].existsAsFile())

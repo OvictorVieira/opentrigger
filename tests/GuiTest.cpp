@@ -801,7 +801,85 @@ struct LaneTests : juce::UnitTest
             for (int l = 1; l < kLanes; ++l) expect (! proc.laneInfo (0, l).on && ! proc.laneInfo (0, l).ready);
         }
 
-        beginTest ("hearing a slot from the editor plays every mic on Main; the Outputs panel works");
+        beginTest ("mixer: a level on a mic's strip puts it on a lane, the bottom of the fader takes it off; pan, polarity, mute and solo act on that mic");
+        {
+            OpenTriggerProcessor p5;
+            p5.setPlayConfigDetails (2, 2, 44100.0, 512);
+            silenceOthers (p5);
+            loadAndWait (p5, 0, kit);
+            expectEquals (p5.laneOfArticulation (0, 0), 0);
+            expectEquals (p5.laneOfArticulation (0, 1), -1);
+            expect (p5.setMicLevel (0, 1, 0.0f), "Kick In on");
+            const int lnIn = p5.laneOfArticulation (0, 1);
+            expect (lnIn > 0);
+            lanesReady (p5, 0, { lnIn });
+            expectWithinAbsoluteError (hitAll (p5)[0], 0.1f + 0.2f, 3e-3f);
+            p5.setMicLevel (0, 1, -6.0206f);
+            expectWithinAbsoluteError (hitAll (p5)[0], 0.1f + 0.1f, 3e-3f);
+            p5.setLanePhase (0, lnIn, true);
+            expectWithinAbsoluteError (hitAll (p5)[0], 0.1f - 0.1f, 3e-3f);
+            p5.setLanePhase (0, lnIn, false);
+            p5.setLanePan (0, lnIn, 1.0f);                                    // hard right: the left channel loses this mic
+            { auto h = hitAll (p5); expectWithinAbsoluteError (h[0], 0.1f, 3e-3f); expectWithinAbsoluteError (h[1], 0.1f + 0.1f * 1.4142f, 4e-3f); }
+            p5.setLanePan (0, lnIn, 0.0f);
+            p5.setLaneMute (0, lnIn, true);
+            expectWithinAbsoluteError (hitAll (p5)[0], 0.1f, 3e-3f);
+            p5.setLaneMute (0, lnIn, false);
+            p5.setLaneSolo (0, lnIn, true);                                   // solo: only this mic (the Full Mix on lane 0 stops)
+            expectWithinAbsoluteError (hitAll (p5)[0], 0.1f, 3e-3f);
+            p5.setLaneSolo (0, lnIn, false);
+            p5.setMicLevel (0, 0, -60.0f);                                    // the slot's own mic to the bottom: silent
+            expectWithinAbsoluteError (hitAll (p5)[0], 0.1f, 3e-3f);
+            p5.setMicLevel (0, 0, 0.0f);
+            p5.setMicLevel (0, 1, -60.0f);                                    // bottom of the fader: lane freed
+            expectEquals (p5.laneOfArticulation (0, 1), -1);
+            expect (! p5.laneInfo (0, lnIn).on);
+            expectWithinAbsoluteError (hitAll (p5)[0], 0.1f, 3e-3f);
+            // every lane can be taken, the next mic is refused instead of overwriting one
+            for (int a = 1; a <= 4; ++a) expect (p5.setMicLevel (0, a, 0.0f));
+            // (only 5 mics in this kit; the lane limit is exercised in the engine tests)
+        }
+
+        beginTest ("MIXED: the mics together sound like the Mixed sound (calibrated against the Full Mix); FULL MIX goes back");
+        {
+            // Full Mix = (Top + Room + Close) x 0.7, the way the libraries are built
+            otci::Instrument k;
+            k.name = "Cal"; k.library = "L";
+            k.waves = { constWave (0.42f), constWave (0.2f), constWave (0.3f), constWave (0.1f) };
+            const char* names[] = { "Hit / Full Mix", "Hit / Top", "Hit / Room", "Hit / Close" };
+            for (int i = 0; i < 4; ++i)
+            {
+                otci::Articulation a; a.name = names[i];
+                a.layers = { { 0, 1.0f, 1.0f, { { i } } } };
+                k.articulations.push_back (a);
+            }
+            auto cf = lib.getChildFile ("Cal.otci");
+            juce::String cerr;
+            expect (otci::write (cf, k, cerr), cerr);
+            OpenTriggerProcessor p6;
+            p6.setPlayConfigDetails (2, 2, 44100.0, 512);
+            silenceOthers (p6);
+            loadAndWait (p6, 0, cf);
+            const float mixed = hitAll (p6)[0];
+            expectWithinAbsoluteError (mixed, 0.42f, 3e-3f);
+            p6.calibrateMixed (0, "Hit");
+            waitUntil ([&] { return p6.mixerMessage().contains ("together") || p6.mixerMessage().startsWith ("Could not"); });
+            expect (p6.mixerMessage().contains ("together"), p6.mixerMessage());
+            for (int a = 1; a <= 3; ++a)
+            {
+                const int ln = p6.laneOfArticulation (0, a);
+                expect (ln > 0, "mic " + juce::String (a) + " has a lane");
+                if (ln > 0) expectWithinAbsoluteError (p6.laneInfo (0, ln).gainDb, 20.0f * std::log10 (0.7f), 0.2f);
+            }
+            expect (p6.laneInfo (0, 0).gainDb <= kLaneOffDb, "the Full Mix lane is silent while the mics play");
+            lanesReady (p6, 0, { p6.laneOfArticulation (0, 1), p6.laneOfArticulation (0, 2), p6.laneOfArticulation (0, 3) });
+            expectWithinAbsoluteError (hitAll (p6)[0], mixed, 0.42f * 0.02f);        // within 2 %: the same sound as the Full Mix
+            p6.resetMixer (0);
+            expectWithinAbsoluteError (hitAll (p6)[0], mixed, 3e-3f);
+            for (int a = 1; a <= 3; ++a) expectEquals (p6.laneOfArticulation (0, a), -1);
+        }
+
+        beginTest ("the Mixer panel: strips per mic of the stroke type, fader drag, buttons, MIXED and FULL MIX");
         {
             OpenTriggerProcessor p4;
             p4.setPlayConfigDetails (2, 2, 44100.0, 512);
@@ -814,25 +892,45 @@ struct LaneTests : juce::UnitTest
             ui->selectSlot (0);
             auto& d = ui->detail();
             expect (d.view() == SlotDetail::View::mics);
-            d.mouseDown (mouseAt (d, (float) d.viewTabRect (SlotDetail::View::outputs).getCentreX(), (float) d.viewTabRect (SlotDetail::View::outputs).getCentreY()));
-            expect (d.view() == SlotDetail::View::outputs, "OUTPUTS tab");
-            for (int l = 1; l < kLanes; ++l) expect (d.laneCell (l, 1).getBottom() <= d.getHeight(), "every lane row fits in the panel");
-            const auto split = d.splitButtonRect();
-            d.mouseDown (mouseAt (d, (float) split.getCentreX(), (float) split.getCentreY()));
-            expect (p4.laneInfo (0, 1).on && p4.laneInfo (0, 2).on && p4.laneInfo (0, 3).on, "split button fills the lanes");
-            // toggle lane 3 off and on with its check box
-            const auto cb = d.laneCell (3, 0);
-            d.mouseDown (mouseAt (d, (float) cb.getCentreX(), (float) cb.getCentreY()));
-            expect (! p4.laneInfo (0, 3).on);
-            d.mouseDown (mouseAt (d, (float) cb.getCentreX(), (float) cb.getCentreY()));
-            expect (p4.laneInfo (0, 3).on);
-            // level: drag to the middle of the bar is -6 dB; double click resets to 0
-            const auto lv = d.laneCell (1, 3);
-            d.mouseDown (mouseAt (d, (float) lv.getCentreX(), (float) lv.getCentreY()));
-            expectWithinAbsoluteError (p4.laneInfo (0, 1).gainDb, -6.0f, 0.6f);
-            d.mouseDoubleClick (mouseAt (d, (float) lv.getCentreX(), (float) lv.getCentreY()));
-            expectWithinAbsoluteError (p4.laneInfo (0, 1).gainDb, 0.0f, 1e-4f);
-            lanesReady (p4, 0, { 1, 2, 3 });
+            const auto tab = d.viewTabRect (SlotDetail::View::mixer);
+            d.mouseDown (mouseAt (d, (float) tab.getCentreX(), (float) tab.getCentreY()));
+            expect (d.view() == SlotDetail::View::mixer, "MIXER tab");
+            expectEquals (d.stripCount(), 4);                                  // Hit: Full Mix, Kick In, Kick Out, Room
+            for (int i = 0; i < d.stripCount(); ++i)
+            {
+                const auto& st = d.strip (i);
+                expect (d.getLocalBounds().contains (st.area) && st.area.contains (st.fader) && st.area.contains (st.out) && st.area.contains (st.name), "strip " + juce::String (i) + " fits in the panel");
+                if (i > 0) expect (! st.area.intersects (d.strip (i - 1).area), "strips do not overlap");
+            }
+            // drag the Kick In fader (strip 1) from the bottom up to the unity mark
+            const auto& s1 = d.strip (1);
+            d.mouseDown (mouseAt (d, (float) s1.fader.getCentreX(), (float) s1.fader.getBottom()));
+            expectEquals (p4.laneOfArticulation (0, 1), -1);                    // still at the bottom = off
+            d.mouseDrag (mouseAt (d, (float) s1.fader.getCentreX(), (float) SlotDetail::dbToY (s1.fader, 0.0f)));
+            const int ln = p4.laneOfArticulation (0, 1);
+            expect (ln > 0, "dragging the fader up turns the mic on");
+            if (ln > 0) expectWithinAbsoluteError (p4.laneInfo (0, ln).gainDb, 0.0f, 0.6f);
+            // buttons of that strip
+            d.mouseDown (mouseAt (d, (float) s1.mute.getCentreX(), (float) s1.mute.getCentreY()));
+            expect (p4.laneInfo (0, ln).mute);
+            d.mouseDown (mouseAt (d, (float) s1.mute.getCentreX(), (float) s1.mute.getCentreY()));
+            d.mouseDown (mouseAt (d, (float) s1.phase.getCentreX(), (float) s1.phase.getCentreY()));
+            expect (p4.laneInfo (0, ln).phase && ! p4.laneInfo (0, ln).mute);
+            d.mouseDoubleClick (mouseAt (d, (float) s1.fader.getCentreX(), (float) s1.fader.getCentreY()));
+            expectWithinAbsoluteError (p4.laneInfo (0, ln).gainDb, 0.0f, 1e-4f);
+            // FULL MIX button
+            const auto rb = d.resetButtonRect();
+            d.mouseDown (mouseAt (d, (float) rb.getCentreX(), (float) rb.getCentreY()));
+            expectEquals (p4.laneOfArticulation (0, 1), -1);
+            // MIXED button (the kit has no separate full-mix wave to compare: it must say so, not break)
+            const auto mb = d.mixedButtonRect();
+            d.mouseDown (mouseAt (d, (float) mb.getCentreX(), (float) mb.getCentreY()));
+            waitUntil ([&] { return p4.mixerMessage().isNotEmpty() && p4.mixerMessage() != "Calibrating..."; });
+            expect (p4.mixerMessage().isNotEmpty());
+            // hearing the slot from the editor plays every mic on Main
+            p4.resetMixer (0);
+            p4.setMicLevel (0, 1, 0.0f); p4.setMicLevel (0, 2, 0.0f); p4.setMicLevel (0, 3, 0.0f);
+            lanesReady (p4, 0, { p4.laneOfArticulation (0, 1), p4.laneOfArticulation (0, 2), p4.laneOfArticulation (0, 3) });
             p4.auditionSlot (0, 100);
             juce::AudioBuffer<float> io (2, 700);
             io.clear();

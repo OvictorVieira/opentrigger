@@ -164,6 +164,56 @@ std::shared_ptr<SlotContent> buildSlotContent (std::shared_ptr<const InstrumentD
     return c;
 }
 
+bool calibrateMixTrim (std::shared_ptr<const InstrumentData> data, int fullArt, const std::vector<int>& micArts, float& trimDb, juce::String& error)
+{
+    if (data == nullptr || micArts.empty()) { error = "nothing to calibrate"; return false; }
+    const auto& arts = data->meta.articulations;
+    juce::FileInputStream in (data->file);
+    if (! in.openedOk()) { error = "cannot open " + data->file.getFullPathName(); return false; }
+    otcrypt::Key key {};
+    const bool encrypted = data->meta.enc.active();
+    if (encrypted && ! otci::resolveKey (data->meta.enc, key, error)) return false;
+    // the loudest layer's first take, both channels one after the other, first 1.5 s
+    auto take = [&] (int artIdx, std::vector<float>& out) -> bool
+    {
+        if (artIdx < 0 || artIdx >= (int) arts.size()) return false;
+        float g = 1.0f;
+        const auto* layer = otci::pickLayer (arts[(size_t) artIdx], 127, g);
+        if (layer == nullptr || layer->roundRobins.empty()) return false;
+        out.assign (2 * 66150, 0.0f);
+        for (int idx : layer->roundRobins[0])
+        {
+            if (idx < 0 || idx >= (int) data->meta.waves.size()) return false;
+            const auto& w = data->meta.waves[(size_t) idx];
+            juce::MemoryBlock blob;
+            juce::AudioBuffer<float> b;
+            double rate = 44100.0;
+            if (w.size <= 0 || ! in.setPosition (w.offset) || in.readIntoMemoryBlock (blob, (juce::int64) w.size) != (size_t) w.size
+                || (encrypted && ! otci::decryptBlob (data->meta.enc, key, idx, blob, error)) || ! decodeFlacBlob (blob, b, rate))
+                return false;
+            const int n = std::min (b.getNumSamples(), 66150);
+            for (int c = 0; c < 2; ++c)
+                for (int i = 0; i < n; ++i) out[(size_t) (c * 66150 + i)] += b.getSample (std::min (c, b.getNumChannels() - 1), i);
+        }
+        return true;
+    };
+    std::vector<float> full, sum, one;
+    if (! take (fullArt, full)) { if (error.isEmpty()) error = "no Full Mix to compare with"; return false; }
+    sum.assign (full.size(), 0.0f);
+    for (int a : micArts)
+    {
+        if (! take (a, one)) { if (error.isEmpty()) error = "cannot read a mic"; return false; }
+        for (size_t i = 0; i < sum.size(); ++i) sum[i] += one[i];
+    }
+    double num = 0.0, den = 0.0, ff = 0.0;
+    for (size_t i = 0; i < sum.size(); ++i) { num += (double) full[i] * sum[i]; den += (double) sum[i] * sum[i]; ff += (double) full[i] * full[i]; }
+    if (den <= 1e-12 || ff <= 1e-12) { error = "silent take"; return false; }
+    const double corr = num / std::sqrt (den * ff);
+    if (corr < 0.9) { error = "the mics do not line up with the Full Mix (correlation " + juce::String (corr, 2) + ")"; return false; }
+    trimDb = juce::jlimit (-24.0f, 6.0f, (float) (20.0 * std::log10 (num / den)));
+    return true;
+}
+
 PreviewSound buildPreview (std::shared_ptr<const InstrumentData> data, int velocity, juce::Random& rng, juce::String& error)
 {
     PreviewSound out;
@@ -402,23 +452,33 @@ void TriggerEngine::triggerSlot (int slot, int velocity, const Params& p, bool a
     else if (takes > 1) { pick = rng.nextInt (takes - 1); if (pick >= last) ++pick; }
     last = pick;
     auto& pool = audition ? auditionVoices : voices;
-    const float laneGain0 = juce::Decibels::decibelsToGain (lp[0].gainDb);
-    for (int idx : layer->roundRobins[(size_t) pick])
-        startVoice (pool, *c, slot, 0, busOf (0), idx, gain * laneGain0, sp, delay);
-
-    // Extra mics of the same hit: same velocity and the same take number, so every mic hears the same strike and the
-    // phase between them is the one that was recorded.
-    for (int lane = 1; lane < kLanes; ++lane)
+    // Every mic of the hit: same velocity and the same take number, so each mic hears the same strike and the phase between
+    // them is the one that was recorded. Each lane has its own level, pan, polarity, mute/solo and output.
+    bool laneSolo = false;
+    for (int lane = 0; lane < kLanes; ++lane)
+        laneSolo = laneSolo || (slots[(size_t) (slot * kLanes + lane)] != nullptr && (lane == 0 || lp[(size_t) lane].on) && lp[(size_t) lane].solo);
+    for (int lane = 0; lane < kLanes; ++lane)
     {
         auto& e = slots[(size_t) (slot * kLanes + lane)];
-        if (e == nullptr || ! lp[(size_t) lane].on) continue;
-        float g2 = 1.0f;
-        const auto* l2 = otci::pickLayer (e->art(), velocity, g2);
-        if (l2 == nullptr || l2->roundRobins.empty()) continue;
-        const int take2 = pick % (int) l2->roundRobins.size();
-        const float lg = juce::Decibels::decibelsToGain (lp[(size_t) lane].gainDb);
+        const auto& L = lp[(size_t) lane];
+        if (e == nullptr || (lane > 0 && ! L.on) || L.gainDb <= kLaneOffDb) continue;
+        if (laneSolo ? ! L.solo : L.mute) continue;
+        float g2 = gain;
+        const otci::Layer* l2 = layer;
+        int take2 = pick;
+        if (lane > 0)
+        {
+            g2 = 1.0f;
+            l2 = otci::pickLayer (e->art(), velocity, g2);
+            if (l2 == nullptr || l2->roundRobins.empty()) continue;
+            take2 = pick % (int) l2->roundRobins.size();
+        }
+        SlotParams q = sp;
+        q.pan = juce::jlimit (-1.0f, 1.0f, sp.pan + L.pan);
+        q.phase = sp.phase != L.phase;
+        const float lg = juce::Decibels::decibelsToGain (L.gainDb);
         for (int idx : l2->roundRobins[(size_t) take2])
-            startVoice (pool, *e, slot, lane, busOf (lane), idx, g2 * lg, sp, delay);
+            startVoice (pool, *e, slot, lane, busOf (lane), idx, g2 * lg, q, delay);
     }
     if (! audition) tel.hits[slot].fetch_add (1, std::memory_order_relaxed);
 }

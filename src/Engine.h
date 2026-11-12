@@ -8,7 +8,7 @@
 #include <memory>
 
 constexpr int kSlots = 8;
-constexpr int kLanes = 6;   // mic lanes per slot: lane 0 is the slot's own mic, lanes 1.. are extra mics played with it
+constexpr int kLanes = 12;  // mic lanes per slot: lane 0 is the slot's own mic, lanes 1.. are extra mics played with it
 constexpr int kBuses = 8;   // stereo outputs: 0 = Main, 1..7 = auxiliary outputs the host can route to other tracks
 
 // ---- fully decoded instrument (used by the instrument editor and tests) -------------------------------
@@ -57,15 +57,21 @@ struct PreviewSound
     std::shared_ptr<juce::AudioBuffer<float>> audio;
     double rate = 44100.0;
 };
+// Mixer calibration: the level (dB) that makes the given mics, added together, as loud as the Full Mix articulation. The
+// Full Mix is the same hit with the mics already summed, so this is a least-squares fit on one loud take.
+bool calibrateMixTrim (std::shared_ptr<const InstrumentData>, int fullArt, const std::vector<int>& micArts, float& trimDb, juce::String& error);
+
 PreviewSound buildPreview (std::shared_ptr<const InstrumentData>, int velocity, juce::Random&, juce::String& error);
 
 // Where one mic lane goes: an output bus (0 = Main) and its own level.
 struct LaneParams
 {
     int bus = 0;
-    float gainDb = 0.0f;
-    bool on = true;
+    float gainDb = 0.0f;          // at or below kLaneOffDb the lane is silent
+    float pan = 0.0f;             // added to the slot's pan
+    bool on = true, mute = false, solo = false, phase = false;
 };
+constexpr float kLaneOffDb = -59.9f;
 
 struct SlotParams
 {

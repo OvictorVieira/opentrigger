@@ -62,13 +62,18 @@ public:
     bool strokeMode() const { return groups.size() > 1; }
     const std::vector<juce::String>& strokeTypes() const { return groups; }
     juce::String strokeType() const { return activeGroup; }
-    // MICS: pick the slot's mic. OUTPUTS: send several mics of the same hit to separate outputs of the plug-in.
-    enum class View { mics, outputs };
+    // MICS: pick the slot's mic. MIXER: a channel strip per mic of the piece (fader, pan, mute/solo, polarity, output).
+    enum class View { mics, mixer };
     View view() const { return viewMode; }
-    void setView (View v) { viewMode = v; layoutChips(); repaint(); }
+    void setView (View v);
     juce::Rectangle<int> viewTabRect (View v) const { return v == View::mics ? tabMics : tabOuts; }
-    juce::Rectangle<int> laneCell (int lane, int col) const;   // col: 0 on, 1 mic, 2 output, 3 level
-    juce::Rectangle<int> splitButtonRect() const { return splitBtn; }
+    struct Strip { int art = 0; juce::Rectangle<int> area, pan, mute, solo, phase, fader, name, out; };
+    int stripCount() const { return (int) strips.size(); }
+    const Strip& strip (int i) const { return strips[(size_t) i]; }
+    juce::Rectangle<int> mixedButtonRect() const { return mixedBtn; }
+    juce::Rectangle<int> resetButtonRect() const { return resetBtn; }
+    static float yToDb (const juce::Rectangle<int>& fader, int y);   // -60 (bottom, off) .. +6
+    static int dbToY (const juce::Rectangle<int>& fader, float db);
     juce::Rectangle<int> strokeBoxRect() const { return strokeBox; }
     void selectStroke (const juce::String& group);   // switches to that style (same mic if it has it) and plays it
     juce::Rectangle<int> chipRect (int i) const { return chips[(size_t) i]; }
@@ -76,12 +81,12 @@ public:
 private:
     void timerCallback() override;
     void layoutChips();
-    void showMicMenu (int lane);
     void showBusMenu (int lane);
-    void setLevelFromX (int lane, int x);
     View viewMode = View::mics;
-    juce::Rectangle<int> tabMics, tabOuts, splitBtn;
-    int dragLane = -1;
+    juce::Rectangle<int> tabMics, tabOuts, mixedBtn, resetBtn;
+    std::vector<Strip> strips;
+    int dragStrip = -1, dragKind = 0, dragStartY = 0;
+    float dragStartValue = 0.0f;
     OpenTriggerProcessor& proc;
     int slot = 0, shownArt = -1;
     OpenTriggerProcessor::SlotInfo info;

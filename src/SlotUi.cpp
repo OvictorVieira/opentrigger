@@ -192,8 +192,8 @@ void SlotDetail::setSlot (int s)
     activeGroup.clear();
     for (int i = 0; i < kSlots; ++i)
     {
-        pan[i]->setVisible (i == slot);
-        tune[i]->setVisible (i == slot);
+        pan[i]->setVisible (i == slot && viewMode == View::mics);
+        tune[i]->setVisible (i == slot && viewMode == View::mics);
     }
     refresh();
 }
@@ -245,11 +245,13 @@ void SlotDetail::layoutChips()
     groups.clear();
     strokeBox = {};
     chipArea = { 16, 90, getWidth() - 340, getHeight() - 100 };
-    tabOuts = { chipArea.getRight() - 112, 22, 112, 24 };
+    const int tabRight = viewMode == View::mixer ? getWidth() - 16 : chipArea.getRight();
+    tabOuts = { tabRight - 112, 22, 112, 24 };
     tabMics = { tabOuts.getX() - 118, 22, 112, 24 };
-    splitBtn = { chipArea.getRight() - 214, 68, 214, 22 };
+    mixedBtn = {}; resetBtn = {};
+    strips.clear();
     if (info.data == nullptr) return;
-    if (viewMode == View::outputs)
+    if (viewMode == View::mixer)
     {
         const auto& arts0 = info.data->meta.articulations;
         chips.assign (arts0.size(), {});
@@ -260,6 +262,33 @@ void SlotDetail::layoutChips()
         }
         if (std::find (groups.begin(), groups.end(), activeGroup) == groups.end())
             activeGroup = ArticulationName::parse (arts0[(size_t) juce::jlimit (0, (int) arts0.size() - 1, proc.slotArticulation (slot))].name).group;
+        strokeBox = groups.size() > 1 ? juce::Rectangle<int> { 352, 22, 190, 26 } : juce::Rectangle<int>();
+        const int bx = groups.size() > 1 ? 550 : 352;
+        mixedBtn = { bx, 22, 86, 26 };
+        resetBtn = { bx + 92, 22, 86, 26 };
+        std::vector<int> mine;
+        for (int i = 0; i < (int) arts0.size(); ++i)
+            if (ArticulationName::parse (arts0[(size_t) i].name).group == activeGroup) mine.push_back (i);
+        const int W = getWidth() - 32, n = std::max (1, (int) mine.size());
+        const int sw = std::min (118, W / n);
+        const int y0 = 62, y1 = getHeight() - 26;
+        int x = 16;
+        for (int art : mine)
+        {
+            Strip st;
+            st.art = art;
+            st.area = { x, y0, sw - 6, y1 - y0 };
+            const int cx = st.area.getCentreX();
+            st.pan = { cx - 17, y0 + 4, 34, 34 };
+            st.mute = { cx - 30, y0 + 42, 28, 18 };
+            st.solo = { cx + 2, y0 + 42, 28, 18 };
+            st.phase = { cx - 30, y0 + 63, 60, 18 };
+            st.fader = { cx - 14, y0 + 88, 28, st.area.getHeight() - 88 - 64 };
+            st.name = { x + 2, y1 - 46, sw - 10, 16 };
+            st.out = { x + 6, y1 - 24, sw - 18, 20 };
+            strips.push_back (st);
+            x += sw;
+        }
         return;
     }
     const auto& arts = info.data->meta.articulations;
@@ -302,6 +331,7 @@ void SlotDetail::layoutChips()
 void SlotDetail::selectStroke (const juce::String& group)
 {
     if (info.data == nullptr || std::find (groups.begin(), groups.end(), group) == groups.end()) return;
+    if (viewMode == View::mixer) { activeGroup = group; layoutChips(); repaint(); return; }   // the mixer only shows that stroke type's mics
     const auto& arts = info.data->meta.articulations;
     const int cur = juce::jlimit (0, (int) arts.size() - 1, proc.slotArticulation (slot));
     const auto wanted = ArticulationName::parse (arts[(size_t) cur].name).label;
@@ -319,40 +349,31 @@ void SlotDetail::selectStroke (const juce::String& group)
     repaint();
 }
 
-juce::Rectangle<int> SlotDetail::laneCell (int lane, int col) const
+void SlotDetail::setView (View v)
 {
-    const int y = 94 + lane * 32;
-    static const int xs[] = { 16, 50, 362, 480 }, ws[] = { 26, 306, 112, 150 };
-    return { xs[col], y, ws[col], 28 };
+    viewMode = v;
+    for (int i = 0; i < kSlots; ++i)
+    {
+        pan[i]->setVisible (i == slot && v == View::mics);
+        tune[i]->setVisible (i == slot && v == View::mics);
+    }
+    layoutChips();
+    repaint();
 }
 
-void SlotDetail::showMicMenu (int lane)
+float SlotDetail::yToDb (const juce::Rectangle<int>& f, int y)
 {
-    if (info.data == nullptr) return;
-    const auto& arts = info.data->meta.articulations;
-    juce::PopupMenu menu;
-    std::vector<juce::String> gs;
-    for (auto& a : arts) { const auto g = ArticulationName::parse (a.name).group; if (std::find (gs.begin(), gs.end(), g) == gs.end()) gs.push_back (g); }
-    const int cur = proc.laneInfo (slot, lane).articulation;
-    for (auto& g : gs)
-    {
-        juce::PopupMenu sub;
-        for (int i = 0; i < (int) arts.size(); ++i)
-        {
-            const auto n = ArticulationName::parse (arts[(size_t) i].name);
-            if (n.group == g) (gs.size() > 1 ? sub : menu).addItem (i + 1, n.label, true, i == cur);
-        }
-        if (gs.size() > 1) menu.addSubMenu (g, sub, true, nullptr, false, 0);
-    }
-    juce::Component::SafePointer<SlotDetail> self (this);
-    const int sl = slot;
-    menu.showMenuAsync (juce::PopupMenu::Options().withTargetComponent (this).withTargetScreenArea (localAreaToGlobal (laneCell (lane, 1))),
-                        [self, lane, sl] (int r)
-                        {
-                            if (self == nullptr || r <= 0) return;
-                            self->proc.setLaneArticulation (sl, lane, r - 1);
-                            if (lane > 0) self->proc.setLaneOn (sl, lane, true);
-                        });
+    const float t = juce::jlimit (0.0f, 1.0f, (float) (f.getBottom() - y) / (float) std::max (1, f.getHeight()));
+    float db = 66.0f * std::sqrt (t) - 60.0f;
+    if (db < -58.0f) return -60.0f;
+    if (std::abs (db) < 0.8f) return 0.0f;
+    return std::round (db * 2.0f) / 2.0f;
+}
+
+int SlotDetail::dbToY (const juce::Rectangle<int>& f, float db)
+{
+    const float t = std::pow (juce::jlimit (0.0f, 1.0f, (db + 60.0f) / 66.0f), 2.0f);
+    return f.getBottom() - (int) std::lround (t * (float) f.getHeight());
 }
 
 void SlotDetail::showBusMenu (int lane)
@@ -363,46 +384,67 @@ void SlotDetail::showBusMenu (int lane)
         menu.addItem (b + 1, OpenTriggerProcessor::busName (b) + (proc.busEnabled (b) ? "" : "  (not enabled in the host: plays on Main)"), true, b == cur);
     juce::Component::SafePointer<SlotDetail> self (this);
     const int sl = slot;
-    menu.showMenuAsync (juce::PopupMenu::Options().withTargetComponent (this).withTargetScreenArea (localAreaToGlobal (laneCell (lane, 2))),
-                        [self, lane, sl] (int r) { if (self != nullptr && r > 0) self->proc.setLaneBus (sl, lane, r - 1); });
-}
-
-void SlotDetail::setLevelFromX (int lane, int x)
-{
-    const auto c = laneCell (lane, 3);
-    const float t = juce::jlimit (0.0f, 1.0f, (float) (x - c.getX()) / (float) c.getWidth());
-    proc.setLaneGain (slot, lane, std::round ((-24.0f + 36.0f * t) * 2.0f) / 2.0f);   // -24 .. +12 dB in 0.5 dB steps
+    menu.showMenuAsync (juce::PopupMenu::Options().withTargetComponent (this),
+                        [self, lane, sl] (int r) { if (self != nullptr && r > 0) { self->proc.setLaneBus (sl, lane, r - 1); self->repaint(); } });
 }
 
 void SlotDetail::mouseDrag (const juce::MouseEvent& e)
 {
-    if (viewMode == View::outputs && dragLane >= 0) { setLevelFromX (dragLane, e.getPosition().x); repaint(); }
+    if (viewMode != View::mixer || dragStrip < 0 || dragStrip >= (int) strips.size()) return;
+    const auto& st = strips[(size_t) dragStrip];
+    if (dragKind == 2) proc.setMicLevel (slot, st.art, yToDb (st.fader, e.getPosition().y));
+    else if (dragKind == 1)
+    {
+        const int lane = proc.laneOfArticulation (slot, st.art);
+        if (lane >= 0)
+        {
+            float p = juce::jlimit (-1.0f, 1.0f, dragStartValue + (float) (dragStartY - e.getPosition().y) / 70.0f);
+            if (std::abs (p) < 0.04f) p = 0.0f;
+            proc.setLanePan (slot, lane, std::round (p * 100.0f) / 100.0f);
+        }
+    }
+    repaint();
 }
 
 void SlotDetail::mouseDoubleClick (const juce::MouseEvent& e)
 {
-    if (viewMode != View::outputs) return;
-    for (int ln = 0; ln < kLanes; ++ln)
-        if (laneCell (ln, 3).contains (e.getPosition())) { proc.setLaneGain (slot, ln, 0.0f); repaint(); return; }
+    if (viewMode != View::mixer) return;
+    for (auto& st : strips)
+    {
+        if (st.fader.expanded (10, 4).contains (e.getPosition())) { proc.setMicLevel (slot, st.art, 0.0f); repaint(); return; }
+        if (st.pan.contains (e.getPosition())) { const int lane = proc.laneOfArticulation (slot, st.art); if (lane >= 0) proc.setLanePan (slot, lane, 0.0f); repaint(); return; }
+    }
 }
 
 void SlotDetail::mouseDown (const juce::MouseEvent& e)
 {
     if (tabMics.contains (e.getPosition())) { setView (View::mics); return; }
-    if (tabOuts.contains (e.getPosition())) { setView (View::outputs); return; }
-    if (viewMode == View::outputs)
+    if (tabOuts.contains (e.getPosition())) { setView (View::mixer); return; }
+    if (viewMode == View::mixer)
     {
-        dragLane = -1;
+        dragStrip = -1;
         if (info.data == nullptr) return;
-        if (splitBtn.contains (e.getPosition())) { proc.splitMicsToOutputs (slot, activeGroup); repaint(); return; }
-        for (int ln = 0; ln < kLanes; ++ln)
+        if (strokeMode() && strokeBox.contains (e.getPosition())) { /* handled below */ }
+        else if (mixedBtn.contains (e.getPosition())) { proc.calibrateMixed (slot, activeGroup); repaint(); return; }
+        else if (resetBtn.contains (e.getPosition())) { proc.resetMixer (slot); repaint(); return; }
+        else
         {
-            if (ln > 0 && laneCell (ln, 0).contains (e.getPosition())) { proc.setLaneOn (slot, ln, ! proc.laneInfo (slot, ln).on); repaint(); return; }
-            if (laneCell (ln, 1).contains (e.getPosition())) { showMicMenu (ln); return; }
-            if (laneCell (ln, 2).contains (e.getPosition())) { showBusMenu (ln); return; }
-            if (laneCell (ln, 3).contains (e.getPosition())) { dragLane = ln; setLevelFromX (ln, e.getPosition().x); repaint(); return; }
+            for (int i = 0; i < (int) strips.size(); ++i)
+            {
+                const auto& st = strips[(size_t) i];
+                if (! st.area.contains (e.getPosition())) continue;
+                const int lane = proc.laneOfArticulation (slot, st.art);
+                if (st.fader.expanded (12, 4).contains (e.getPosition())) { dragStrip = i; dragKind = 2; proc.setMicLevel (slot, st.art, yToDb (st.fader, e.getPosition().y)); }
+                else if (lane >= 0 && st.pan.contains (e.getPosition())) { dragStrip = i; dragKind = 1; dragStartY = e.getPosition().y; dragStartValue = proc.laneInfo (slot, lane).pan; }
+                else if (lane >= 0 && st.mute.contains (e.getPosition())) proc.setLaneMute (slot, lane, ! proc.laneInfo (slot, lane).mute);
+                else if (lane >= 0 && st.solo.contains (e.getPosition())) proc.setLaneSolo (slot, lane, ! proc.laneInfo (slot, lane).solo);
+                else if (lane >= 0 && st.phase.contains (e.getPosition())) proc.setLanePhase (slot, lane, ! proc.laneInfo (slot, lane).phase);
+                else if (lane >= 0 && st.out.contains (e.getPosition())) showBusMenu (lane);
+                repaint();
+                return;
+            }
+            return;
         }
-        return;
     }
     if (strokeMode() && strokeBox.contains (e.getPosition()))
     {
@@ -447,8 +489,8 @@ void SlotDetail::paint (juce::Graphics& g)
     const auto& m = info.data->meta;
     g.setColour (text);
     g.setFont (font (20.0f, true));
-    g.drawText (slotTitle (info), 16, 26, getWidth() - 360 - 240, 26, juce::Justification::left);
-    for (auto v : { View::mics, View::outputs })
+    g.drawText (slotTitle (info), 16, 26, viewMode == View::mixer ? 330 : getWidth() - 360 - 240, 26, juce::Justification::left);
+    for (auto v : { View::mics, View::mixer })
     {
         const auto r = viewTabRect (v);
         const bool on = v == viewMode;
@@ -458,74 +500,94 @@ void SlotDetail::paint (juce::Graphics& g)
         g.drawRoundedRectangle (r.toFloat().reduced (0.5f), 12.0f, 1.0f);
         g.setColour (on ? bg : text);
         g.setFont (font (12.0f, true));
-        g.drawText (v == View::mics ? "MICS" : "OUTPUTS", r, juce::Justification::centred);
+        g.drawText (v == View::mics ? "MICS" : "MIXER", r, juce::Justification::centred);
     }
     g.setColour (dim);
     g.setFont (font (12.0f));
     const int art = juce::jlimit (0, (int) m.articulations.size() - 1, proc.slotArticulation (slot));
     const auto& a = m.articulations[(size_t) art];
     const int rr = a.layers.empty() ? 0 : (int) a.layers[0].roundRobins.size();
-    g.drawText (m.library + "   |   " + juce::String ((int) a.layers.size()) + " velocity layers x " + juce::String (rr) + " round robins",
+    if (viewMode == View::mics) g.drawText (m.library + "   |   " + juce::String ((int) a.layers.size()) + " velocity layers x " + juce::String (rr) + " round robins",
                 16, 54, getWidth() - 360, 16, juce::Justification::left);
     g.setColour (dim);
     g.setFont (font (11.0f, true));
-    if (viewMode == View::outputs)
+    if (viewMode == View::mixer)
     {
-        g.setColour (dim);
-        g.setFont (font (11.0f, true));
-        g.drawText ("ON", laneCell (0, 0).getX(), 72, 30, 14, juce::Justification::left);
-        g.drawText ("MIC (all play together on every hit)", laneCell (0, 1).getX(), 72, 300, 14, juce::Justification::left);
-        g.drawText ("OUTPUT", laneCell (0, 2).getX(), 72, 110, 14, juce::Justification::left);
-        g.drawText ("LEVEL", laneCell (0, 3).getX(), 72, 100, 14, juce::Justification::left);
-        g.setColour (panelHi);
-        g.fillRoundedRectangle (splitBtn.toFloat(), 5.0f);
-        g.setColour (orange);
-        g.drawRoundedRectangle (splitBtn.toFloat().reduced (0.5f), 5.0f, 1.0f);
-        g.setColour (text);
-        g.setFont (font (11.0f, true));
-        g.drawText ("SPLIT MICS TO OUTPUTS", splitBtn, juce::Justification::centred);
-        const auto& arts = m.articulations;
-        for (int ln = 0; ln < kLanes; ++ln)
+        auto button = [&] (juce::Rectangle<int> r, const juce::String& t, bool on, juce::Colour onCol)
         {
-            const auto li = proc.laneInfo (slot, ln);
-            const bool shown = li.on;
-            auto draw = [&] (juce::Rectangle<int> r, bool hot)
-            {
-                g.setColour (hot ? panelHi.brighter (0.05f) : panelHi);
-                g.fillRoundedRectangle (r.toFloat(), 5.0f);
-                g.setColour (line);
-                g.drawRoundedRectangle (r.toFloat().reduced (0.5f), 5.0f, 1.0f);
-            };
-            auto cb = laneCell (ln, 0);
-            draw (cb, false);
-            if (ln == 0) { g.setColour (dim); g.drawText ("1", cb, juce::Justification::centred); }
-            else if (shown) { g.setColour (accent); g.fillRoundedRectangle (cb.toFloat().reduced (7.0f), 3.0f); }
-            auto mc = laneCell (ln, 1);
-            draw (mc, shown);
-            g.setColour (shown ? text : dim);
-            g.setFont (font (12.0f, shown));
-            const auto name = li.articulation >= 0 && li.articulation < (int) arts.size() ? arts[(size_t) li.articulation].name.replace (" / ", "  -  ") : juce::String();
-            g.drawText (shown || ln == 0 ? name : juce::String ("Click to add a mic"), mc.reduced (10, 0), juce::Justification::centredLeft);
-            auto oc = laneCell (ln, 2);
-            draw (oc, shown);
-            const bool missing = li.bus > 0 && ! proc.busEnabled (li.bus);
-            g.setColour (! shown ? dim : missing ? orange : text);
-            g.drawText (OpenTriggerProcessor::busName (li.bus) + (missing ? " (off)" : ""), oc.reduced (10, 0), juce::Justification::centredLeft);
-            auto lc = laneCell (ln, 3);
-            draw (lc, shown);
-            const float t = (li.gainDb + 24.0f) / 36.0f;
-            g.setColour (shown ? accent : line);
-            g.fillRoundedRectangle (lc.toFloat().reduced (2.0f).withWidth ((lc.getWidth() - 4) * juce::jlimit (0.0f, 1.0f, t)), 3.0f);
-            g.setColour (shown ? bg : dim);
-            g.setFont (font (11.0f, true));
-            g.drawText (juce::String (li.gainDb, 1) + " dB", lc, juce::Justification::centred);
+            g.setColour (on ? onCol : panelHi);
+            g.fillRoundedRectangle (r.toFloat(), 4.0f);
+            g.setColour (on ? onCol.brighter (0.2f) : line);
+            g.drawRoundedRectangle (r.toFloat().reduced (0.5f), 4.0f, 1.0f);
+            g.setColour (on ? bg : text);
+            g.setFont (font (10.0f, true));
+            g.drawText (t, r, juce::Justification::centred);
+        };
+        if (strokeMode())
+        {
+            auto sb = strokeBox.toFloat();
+            g.setColour (panelHi);
+            g.fillRoundedRectangle (sb, 5.0f);
+            g.setColour (orange);
+            g.drawRoundedRectangle (sb.reduced (0.5f), 5.0f, 1.0f);
+            g.setColour (text);
+            g.setFont (font (12.0f, true));
+            g.drawText (activeGroup, strokeBox.reduced (10, 0).withTrimmedRight (20), juce::Justification::centredLeft);
         }
-        g.setColour (dim);
-        g.setFont (font (11.0f));
-        g.drawText ("Outputs 2 to 8 are extra stereo pairs in your DAW's routing. Until the DAW enables one, its mics play on Main.",
-                    16, getHeight() - 22, getWidth() - 340, 14, juce::Justification::left);
-        g.setColour (line);
-        g.drawVerticalLine (getWidth() - 310, 40.0f, (float) getHeight() - 16.0f);
+        button (mixedBtn, "MIXED", false, orange);
+        button (resetBtn, "FULL MIX", false, orange);
+        const auto note = proc.mixerMessage();
+        if (note.isNotEmpty())
+        {
+            g.setColour (dim);
+            g.setFont (font (11.0f));
+            g.drawText (note, 16, getHeight() - 20, getWidth() - 32, 14, juce::Justification::left);
+        }
+        for (auto& st : strips)
+        {
+            const int lane = proc.laneOfArticulation (slot, st.art);
+            const auto li = proc.laneInfo (slot, lane < 0 ? 0 : lane);
+            const bool live = lane >= 0 && li.gainDb > kLaneOffDb;
+            g.setColour (panelHi.darker (0.25f));
+            g.fillRoundedRectangle (st.area.toFloat(), 6.0f);
+            g.setColour (lane >= 0 ? line.brighter (0.2f) : line);
+            g.drawRoundedRectangle (st.area.toFloat().reduced (0.5f), 6.0f, 1.0f);
+            // pan knob
+            const auto kc = st.pan.toFloat().getCentre();
+            const float kr = 14.0f, ang = (lane >= 0 ? li.pan : 0.0f) * 2.35f;
+            g.setColour (panelHi);
+            g.fillEllipse (kc.x - kr, kc.y - kr, kr * 2, kr * 2);
+            g.setColour (live ? orange : line);
+            g.drawEllipse (kc.x - kr, kc.y - kr, kr * 2, kr * 2, 1.6f);
+            g.setColour (live ? text : dim);
+            g.drawLine (kc.x, kc.y, kc.x + std::sin (ang) * (kr - 3.0f), kc.y - std::cos (ang) * (kr - 3.0f), 2.2f);
+            button (st.mute, "M", lane >= 0 && li.mute, orange);
+            button (st.solo, "S", lane >= 0 && li.solo, accent);
+            button (st.phase, "PHASE", lane >= 0 && li.phase, orange);
+            // fader
+            const auto& f = st.fader;
+            g.setColour (juce::Colours::black.withAlpha (0.55f));
+            g.fillRoundedRectangle ((float) f.getCentreX() - 3.0f, (float) f.getY(), 6.0f, (float) f.getHeight(), 3.0f);
+            g.setColour (line);
+            g.drawHorizontalLine (dbToY (f, 0.0f), (float) f.getX() + 2.0f, (float) f.getRight() - 2.0f);
+            const int cy = dbToY (f, lane >= 0 ? li.gainDb : -60.0f);
+            auto cap = juce::Rectangle<float> ((float) f.getX() - 1.0f, (float) cy - 8.0f, (float) f.getWidth() + 2.0f, 16.0f);
+            g.setColour (live ? orange : panelHi.brighter (0.15f));
+            g.fillRoundedRectangle (cap, 3.0f);
+            g.setColour (live ? orange.brighter (0.35f) : line);
+            g.drawRoundedRectangle (cap.reduced (0.5f), 3.0f, 1.0f);
+            g.setColour (live ? bg : dim);
+            g.drawHorizontalLine (cy, cap.getX() + 4.0f, cap.getRight() - 4.0f);
+            g.setColour (live ? text : dim);
+            g.setFont (font (10.0f));
+            g.drawText (live ? juce::String (li.gainDb, 1) + " dB" : juce::String ("off"), st.fader.getX() - 14, st.fader.getBottom() + 2, st.fader.getWidth() + 28, 12, juce::Justification::centred);
+            // name and output
+            g.setColour (live ? text : dim);
+            g.setFont (font (10.5f, live));
+            g.drawFittedText (ArticulationName::parse (m.articulations[(size_t) st.art].name).label, st.name, juce::Justification::centred, 1, 0.75f);
+            const bool missing = lane >= 0 && li.bus > 0 && ! proc.busEnabled (li.bus);
+            button (st.out, (lane >= 0 ? OpenTriggerProcessor::busName (li.bus).toUpperCase() : juce::String ("MAIN")) + (missing ? " (OFF)" : ""), false, orange);
+        }
         return;
     }
     if (strokeMode())

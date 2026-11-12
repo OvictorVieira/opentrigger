@@ -47,12 +47,25 @@ public:
     // ---- mic lanes and outputs (message thread) ----
     // Each slot can play several mics of the same hit at once (lane 0 is the slot's own mic, set with setSlotArticulation).
     // Every lane goes to an output: 0 = Main, 1..7 = auxiliary outputs ("Out 2".."Out 8") the DAW can route to other tracks.
-    struct LaneInfo { bool on = false, ready = false; int articulation = 0, bus = 0; float gainDb = 0.0f; };
+    struct LaneInfo { bool on = false, ready = false, mute = false, solo = false, phase = false; int articulation = 0, bus = 0; float gainDb = 0.0f, pan = 0.0f; };
     LaneInfo laneInfo (int slot, int lane) const;
     void setLaneOn (int slot, int lane, bool on);                 // lanes 1.. only (lane 0 is always on)
     void setLaneArticulation (int slot, int lane, int articulation);
     void setLaneBus (int slot, int lane, int bus);
     void setLaneGain (int slot, int lane, float gainDb);
+    void setLanePan (int slot, int lane, float pan);              // -1 .. 1, added to the slot's pan
+    void setLaneMute (int slot, int lane, bool on);
+    void setLaneSolo (int slot, int lane, bool on);
+    void setLanePhase (int slot, int lane, bool on);
+    // Mixer, per mic (articulation) of the slot: the strip for that mic. A level above -60 dB puts the mic on a lane (decoding it);
+    // at -60 dB it is off again. Returns false when all the lanes are taken.
+    int laneOfArticulation (int slot, int articulation) const;    // -1 if that mic is not playing
+    bool setMicLevel (int slot, int articulation, float gainDb);
+    // Makes the mics of one stroke type, added together, sound like that type's Full Mix (the Mixed sound): lane 0 becomes the
+    // Full Mix at silence and every other mic gets the calibrated level. Runs in the background.
+    void calibrateMixed (int slot, const juce::String& group);
+    void resetMixer (int slot);                                   // back to the plain Full Mix on Main
+    juce::String mixerMessage() const { return mixerNote; }
     // Puts every mic of one stroke type (e.g. "Hit") on its own lane and output: lane 0 stays where it is, the other mics
     // go to Out 2, Out 3... Mic names come from the instrument ("Hit / Kick In" -> group "Hit").
     void splitMicsToOutputs (int slot, const juce::String& group);
@@ -101,7 +114,8 @@ private:
     };
     double sampleRateNow = 44100.0;
     std::array<SlotState, kSlots> slotState;
-    struct LaneCfg { std::atomic<int> art { 0 }, bus { 0 }; std::atomic<float> gainDb { 0.0f }; std::atomic<bool> on { false }; };
+    struct LaneCfg { std::atomic<int> art { 0 }, bus { 0 }; std::atomic<float> gainDb { 0.0f }, pan { 0.0f }; std::atomic<bool> on { false }, mute { false }, solo { false }, phase { false }; };
+    juce::String mixerNote;
     struct LaneState { std::shared_ptr<const SlotContent> content; int contentArt = -1; bool building = false; juce::uint64 gen = 0; };
     std::array<std::array<LaneCfg, kLanes>, kSlots> laneCfg;
     std::array<std::array<LaneState, kLanes>, kSlots> laneState;
