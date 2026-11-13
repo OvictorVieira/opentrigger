@@ -409,6 +409,13 @@ OpenTriggerProcessor::LaneInfo OpenTriggerProcessor::laneInfo (int slot, int lan
 bool OpenTriggerProcessor::busEnabled (int bus) const
 {
     if (bus <= 0) return true;
+    if (bus >= kBuses)                                      // mono output n: channel n % 2 of stereo output n / 2
+    {
+        const int m = bus - kBuses;
+        if (m >= kMonoOuts) return false;
+        if (m / 2 == 0) return m == 0 || getMainBusNumOutputChannels() != 1;
+        bus = m / 2;
+    }
     const auto* b = getBus (false, bus);
     return b != nullptr && b->isEnabled();
 }
@@ -433,7 +440,7 @@ void OpenTriggerProcessor::setLaneArticulation (int slot, int lane, int a)
 void OpenTriggerProcessor::setLaneBus (int slot, int lane, int bus)
 {
     if (slot < 0 || slot >= kSlots || lane < 0 || lane >= kLanes) return;
-    laneCfg[(size_t) slot][(size_t) lane].bus = juce::jlimit (0, kBuses - 1, bus);
+    laneCfg[(size_t) slot][(size_t) lane].bus = juce::jlimit (0, kBuses + kMonoOuts - 1, bus);
     slotsChanged.sendChangeMessage();
 }
 
@@ -685,7 +692,7 @@ void OpenTriggerProcessor::setStateInformation (const void* data, int size)
             const bool have = f.size() == 4 || f.size() == 8;           // 4 fields: projects from the first beta
             c.on = ln > 0 && have && f[0].getIntValue() != 0;
             c.art = have ? juce::jlimit (0, 63, f[1].getIntValue()) : 0;
-            c.bus = have ? juce::jlimit (0, kBuses - 1, f[2].getIntValue()) : 0;
+            c.bus = have ? juce::jlimit (0, kBuses + kMonoOuts - 1, f[2].getIntValue()) : 0;
             c.gainDb = have ? juce::jlimit (-60.0f, 12.0f, f[3].getFloatValue()) : 0.0f;
             c.pan = f.size() == 8 ? juce::jlimit (-1.0f, 1.0f, f[4].getFloatValue()) : 0.0f;
             c.mute = f.size() == 8 && f[5].getIntValue() != 0;

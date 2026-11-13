@@ -436,7 +436,13 @@ void TriggerEngine::triggerSlot (int slot, int velocity, const Params& p, bool a
     auto busOf = [&] (int lane)
     {
         const int b = lp[(size_t) lane].bus;
-        return (! audition && b > 0 && b < kBuses && p.busChannel[(size_t) b] >= 0) ? b : 0;
+        if (audition || b <= 0) return 0;
+        if (b < kBuses) return p.busChannel[(size_t) b] >= 0 ? b : 0;
+        const int m = b - kBuses;                                    // mono output: lives on channel m % 2 of stereo bus m / 2
+        if (m >= kMonoOuts) return 0;
+        const int sb = m / 2;
+        if (sb == 0) return (m == 0 || p.mainChannels != 1) ? b : 0;
+        return p.busChannel[(size_t) sb] >= 0 ? b : 0;
     };
     const auto& art = c->art();
     float gain = 1.0f;
@@ -500,11 +506,28 @@ void TriggerEngine::fire (int velocity, const Params& p, int delay)
 void TriggerEngine::renderVoice (Voice& v, const BusOut& o, int n)
 {
     if (v.buf == nullptr) return;
-    float* l = o.l[v.bus] != nullptr ? o.l[v.bus] : o.l[0];
-    float* r = o.r[v.bus] != nullptr ? o.r[v.bus] : o.r[0];
+    const bool mono = v.bus >= kBuses;
+    const int sb = mono ? (v.bus - kBuses) / 2 : v.bus;
+    float* l = o.l[sb] != nullptr ? o.l[sb] : o.l[0];
+    float* r = o.r[sb] != nullptr ? o.r[sb] : o.r[0];
+    float* m1 = nullptr;                                  // mono output: the voice, summed, goes to one channel only
+    if (mono) m1 = ((v.bus - kBuses) % 2 == 0) ? o.l[sb] : o.r[sb];
     const int len = v.buf->getNumSamples();
     const float* a = v.buf->getReadPointer (0);
     const float* b = v.buf->getNumChannels() > 1 ? v.buf->getReadPointer (1) : a;
+    if (m1 != nullptr)
+    {
+        for (int i = 0; i < n; ++i)
+        {
+            if (v.delay > 0) { --v.delay; continue; }
+            const int i0 = (int) v.pos;
+            if (i0 >= len - 1) { v.buf = nullptr; break; }
+            const float fr = (float) (v.pos - i0);
+            m1[i] += 0.5f * (v.gL * (a[i0] + (a[i0 + 1] - a[i0]) * fr) + v.gR * (b[i0] + (b[i0 + 1] - b[i0]) * fr));
+            v.pos += v.step;
+        }
+        return;
+    }
     for (int i = 0; i < n; ++i)
     {
         if (v.delay > 0) { --v.delay; continue; }
