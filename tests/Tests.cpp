@@ -957,29 +957,6 @@ struct LaneEngineTests : juce::UnitTest
             expectWithinAbsoluteError (at (b, 0), 0.1f + 0.3f, 1e-3f);
         }
 
-        beginTest ("a mono output puts the mic, summed, on a single channel and nothing on its neighbour");
-        {
-            auto q = p;
-            q.lane[0][1].bus = kBuses + 2;                    // Mono 3 = host channel 2
-            auto b = run (eng, q, 30);
-            expectWithinAbsoluteError (at (b, 2), 0.3f, 1e-3f);
-            expectWithinAbsoluteError (at (b, 3), 0.0f, 1e-3f);
-            q.lane[0][1].bus = kBuses + 3;                    // Mono 4 = host channel 3
-            b = run (eng, q, 30);
-            expectWithinAbsoluteError (at (b, 2), 0.0f, 1e-3f);
-            expectWithinAbsoluteError (at (b, 3), 0.3f, 1e-3f);
-            expectWithinAbsoluteError (at (b, 0), 0.1f, 1e-3f);   // Main still holds lane 0 only
-        }
-
-        beginTest ("a mono output the host has not enabled falls back to Main, like a stereo one");
-        {
-            auto q = p;
-            q.lane[0][1].bus = kBuses + 2;
-            q.busChannel[1] = -1;
-            auto b = run (eng, q, 30, 2);
-            expectWithinAbsoluteError (at (b, 0), 0.1f + 0.3f, 1e-3f);
-        }
-
         beginTest ("lane level, lane off, lane removed");
         {
             auto q = p;

@@ -71,7 +71,7 @@ public:
     // go to Out 2, Out 3... Mic names come from the instrument ("Hit / Kick In" -> group "Hit").
     void splitMicsToOutputs (int slot, const juce::String& group);
     bool busEnabled (int bus) const;                              // is that output enabled in the host?
-    static juce::String busName (int bus) { return bus <= 0 ? juce::String ("Main") : bus < kBuses ? "Out " + juce::String (bus + 1) : "Mono " + juce::String (bus - kBuses + 1); }
+    static juce::String busName (int bus) { return bus <= 0 ? juce::String ("Main") : "Out " + juce::String (bus + 1); }
     void clearSlot (int slot);
     // Drives the s<N>_art parameter (0..63) and starts decoding that mic right away; with auditionWhenReady the slot plays
     // one hit the moment the new mic is in.

@@ -9,7 +9,6 @@
 
 constexpr int kSlots = 8;
 constexpr int kLanes = 12;  // mic lanes per slot: lane 0 is the slot's own mic, lanes 1.. are extra mics played with it
-constexpr int kMonoOuts = 16; // mono outputs: a lane's bus value kBuses + n sends it summed to mono to host channel n (0..15)
 constexpr int kBuses = 8;   // stereo outputs: 0 = Main, 1..7 = auxiliary outputs the host can route to other tracks
 
 // ---- fully decoded instrument (used by the instrument editor and tests) -------------------------------

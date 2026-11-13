@@ -400,14 +400,8 @@ void SlotDetail::showBusMenu (int lane)
 {
     juce::PopupMenu menu;
     const int cur = proc.laneInfo (slot, lane).bus;
-    const juce::String off = "  (not enabled in the host: plays on Main)";
-    menu.addSectionHeader ("Stereo");
     for (int b = 0; b < kBuses; ++b)
-        menu.addItem (b + 1, OpenTriggerProcessor::busName (b) + (proc.busEnabled (b) ? "" : off), true, b == cur);
-    menu.addSeparator();
-    menu.addSectionHeader ("Mono (sum of the mic on one channel)");
-    for (int m = 0; m < kMonoOuts; ++m)
-        menu.addItem (kBuses + m + 1, OpenTriggerProcessor::busName (kBuses + m) + (proc.busEnabled (kBuses + m) ? "" : off), true, kBuses + m == cur);
+        menu.addItem (b + 1, OpenTriggerProcessor::busName (b) + (proc.busEnabled (b) ? "" : "  (not enabled in the host: plays on Main)"), true, b == cur);
     juce::Component::SafePointer<SlotDetail> self (this);
     const int sl = slot;
     menu.showMenuAsync (juce::PopupMenu::Options().withTargetComponent (this),
