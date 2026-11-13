@@ -429,6 +429,36 @@ struct GuiTests : juce::UnitTest
             expectWithinAbsoluteError (proc.apvts.getRawParameterValue ("gateRelease")->load(), res.gateReleaseMs, 1.0f);
             expect (res.hasOutput, "a kit piece is loaded, so the output level is matched");
             expectWithinAbsoluteError (proc.apvts.getRawParameterValue ("gain")->load(), res.outputGainDb, 0.15f);
+            {
+                // the whole point: with the calibrated volume the kit plays as loud as the recorded hits (body of each hit, 100 ms)
+                setParam ("mix", 1.0f);
+                std::vector<float> played;
+                {
+                    juce::MidiBuffer m;
+                    for (size_t pos = 0; pos + 512 <= track.size(); pos += 512)
+                    {
+                        juce::AudioBuffer<float> io (2, 512);
+                        for (int i = 0; i < 512; ++i) { io.setSample (0, i, track[pos + (size_t) i]); io.setSample (1, i, track[pos + (size_t) i]); }
+                        proc.processBlock (io, m);
+                        for (int i = 0; i < 512; ++i) played.push_back (0.5f * (io.getSample (0, i) + io.getSample (1, i)));
+                    }
+                }
+                std::vector<float> diffs;
+                const int lat = TriggerEngine::kLatency, len = 4410;
+                for (int pos : res.hitPos)
+                {
+                    if ((size_t) (pos + lat + len) >= played.size()) continue;
+                    double ei = 0.0, eo = 0.0;
+                    for (int i = 0; i < len; ++i) { ei += (double) track[(size_t) (pos + i)] * track[(size_t) (pos + i)]; eo += (double) played[(size_t) (pos + lat + i)] * played[(size_t) (pos + lat + i)]; }
+                    if (ei > 0.0 && eo > 0.0) diffs.push_back (10.0f * (float) std::log10 (eo / ei));
+                }
+                expect (diffs.size() >= 8, "hits measured: " + juce::String ((int) diffs.size()));
+                if (diffs.size() >= 8)
+                {
+                    std::sort (diffs.begin(), diffs.end());
+                    expectWithinAbsoluteError (diffs[diffs.size() / 2], 0.0f, 3.0f); // kit vs recorded hit, median, dB
+                }
+            }
             // a failed attempt leaves the settings alone and says why
             sp.open();
             sp.startListening();

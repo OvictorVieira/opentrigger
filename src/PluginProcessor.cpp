@@ -201,6 +201,79 @@ void OpenTriggerProcessor::applyLearn (const LearnResult& r)
     set ("suppress", r.suppress);
 }
 
+bool OpenTriggerProcessor::calibrateOutputByRendering (LearnResult& r, const float* x, int n) const
+{
+    if (x == nullptr || n <= 0 || r.hitPos.size() < 4 || r.hitPos.size() != r.hitDb.size()) return false;
+    const double sr = r.sampleRate;
+    TriggerEngine eng;
+    eng.prepare (sr, 512);
+    bool any = false;
+    for (int s = 0; s < kSlots; ++s)
+        for (int ln = 0; ln < kLanes; ++ln)
+        {
+            std::shared_ptr<const SlotContent> c = ln == 0 ? slotState[(size_t) s].info.content : laneState[(size_t) s][(size_t) ln].content;
+            if (c == nullptr) continue;
+            eng.setLaneContent (s, ln, std::const_pointer_cast<SlotContent> (c));
+            any = true;
+        }
+    if (! any) return false;
+    auto p = snapshotParams();                       // slots, lanes and mixer as they are now, but every output summed on Main
+    p.source = TriggerEngine::audioOnly; p.mix = 1.0f; p.outGainDb = 0.0f; p.midiNote = -1; p.mainChannels = 2;
+    for (auto& b : p.busChannel) b = -1;
+    p.busChannel[0] = 0;
+    for (auto& sl : p.lane) for (auto& l : sl) l.bus = 0;
+    p.inGainDb = r.inputGainDb; p.thresholdDb = r.thresholdDb; p.holdoffMs = r.retriggerMs;
+    p.sensitivity = r.sensitivity; p.detail = r.detail; p.suppress = r.suppress;
+    p.lowcutHz = r.lowcutHz; p.highcutHz = r.highcutHz;
+    p.gateOn = r.gateOn; p.gateAttackMs = r.gateAttackMs; p.gateHoldMs = r.gateHoldMs; p.gateReleaseMs = r.gateReleaseMs;
+
+    std::vector<float> out ((size_t) n, 0.0f);
+    juce::MidiBuffer midi;
+    juce::AudioBuffer<float> io (2, 512);
+    for (int s = 0; s < n; s += 512)
+    {
+        const int k = std::min (512, n - s);
+        io.clear();
+        for (int i = 0; i < k; ++i) { io.setSample (0, i, x[s + i]); io.setSample (1, i, x[s + i]); }
+        midi.clear();
+        eng.process (io, midi, p);
+        for (int i = 0; i < k; ++i) out[(size_t) (s + i)] = 0.5f * (io.getSample (0, i) + io.getSample (1, i));
+    }
+    // what the kit did against each recorded hit: peak and body loudness (first 100 ms), the kit delayed by its latency
+    const int lat = TriggerEngine::kLatency;
+    std::vector<float> dPeak, dRms;
+    float maxOut = 0.0f;
+    for (size_t k = 0; k < r.hitPos.size(); ++k)
+    {
+        const int a = r.hitPos[k];
+        const int next = k + 1 < r.hitPos.size() ? r.hitPos[k + 1] : n;
+        const int len = std::min ((int) (0.100 * sr), next - a);
+        if (len < (int) (0.01 * sr) || a + lat + len > n) continue;
+        float pk = 0.0f;
+        double ei = 0.0, eo = 0.0;
+        for (int i = -(int) (0.004 * sr); i < len; ++i)
+        {
+            const int io_ = a + lat + i;
+            if (io_ >= 0 && io_ < n) pk = std::max (pk, std::abs (out[(size_t) io_]));
+        }
+        for (int i = 0; i < len; ++i) { ei += (double) x[a + i] * x[a + i]; eo += (double) out[(size_t) (a + lat + i)] * out[(size_t) (a + lat + i)]; }
+        maxOut = std::max (maxOut, pk);
+        if (pk < 1e-4f || eo <= 0.0 || ei <= 0.0) continue;          // the kit did not answer this hit
+        dPeak.push_back (r.hitDb[k] - juce::Decibels::gainToDecibels (pk));
+        dRms.push_back (10.0f * (float) std::log10 (ei / eo));
+    }
+    if (dPeak.size() < 4) return false;
+    auto median = [] (std::vector<float> v) { std::sort (v.begin(), v.end()); return v[v.size() / 2]; };
+    // loudness decides (the body of the hit); the peak only limits it: never more than 4 dB peakier than the recorded hit,
+    // and the loudest hit stays under full scale
+    float gain = median (dRms);
+    gain = std::min (gain, median (dPeak) + 4.0f);
+    gain = std::min (gain, -0.5f - juce::Decibels::gainToDecibels (maxOut));
+    r.outputGainDb = juce::jlimit (-24.0f, 14.0f, std::round (gain * 10.0f) / 10.0f);
+    r.hasOutput = true;
+    return true;
+}
+
 bool OpenTriggerProcessor::estimateOutputDb (LearnResult& r) const
 {
     // velocity the median hit will play at (same mapping as the engine)

@@ -52,7 +52,8 @@ void SmartTriggerPanel::finishAnalysis()
     stopTimer();
     const int n = buf ? buf->pos.load (std::memory_order_acquire) : 0;
     res = analyzeLearn (buf ? buf->data.data() : nullptr, n, proc.currentSampleRate());
-    if (res.ok) proc.estimateOutputDb (res); // needs the loaded kit piece
+    // needs the loaded kit piece: measured on the heard audio first, the peak estimate when nothing could be measured
+    if (res.ok && ! (buf && proc.calibrateOutputByRendering (res, buf->data.data(), n))) proc.estimateOutputDb (res);
     st = res.ok ? State::result : State::failed;
     stopBtn.setEnabled (true);
     resized();

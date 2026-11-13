@@ -89,6 +89,9 @@ public:
     void applyLearn (const struct LearnResult&);          // sets the whole detection / gate / level chain from the analysis
     // Output volume (dB) that makes the loaded, unmuted slots as loud as the original hit; false if nothing is loaded.
     bool estimateOutputDb (struct LearnResult&) const;
+    // Same, measured for real: plays the loaded slots (as the mixer has them, all outputs summed) over the audio Smart Trigger
+    // just heard, with the proposed settings, and sets the volume so the kit hits are as loud as the recorded ones.
+    bool calibrateOutputByRendering (struct LearnResult&, const float* audio, int numSamples) const;
     double currentSampleRate() const { return sampleRateNow; }
 
     static juce::String slotParam (int slot, const char* name) { return "s" + juce::String (slot + 1) + "_" + name; }
