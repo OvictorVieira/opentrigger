@@ -75,11 +75,15 @@ LearnResult analyzeLearn (const float* x, int n, double sr)
         env[(size_t) h] = e;
     }
     {
-        std::vector<float> db ((size_t) hops);
-        for (int h = 0; h < hops; ++h) db[(size_t) h] = toDb (env[(size_t) h]);
-        r.noiseFloorDb = percentile (db, 0.20f);
+        // noise floor over the stretches that carry signal: a track gated or edited down to digital silence has no floor
+        // to speak of, and counting the silence made every decay ripple look like a hit
+        std::vector<float> db;
+        db.reserve ((size_t) hops);
+        for (int h = 0; h < hops; ++h) if (env[(size_t) h] > 1e-5f) db.push_back (toDb (env[(size_t) h]));
+        r.noiseFloorDb = db.empty() ? -100.0f : percentile (db, 0.20f);
     }
-    const float floorLin = std::pow (10.0f, (r.noiseFloorDb + 6.0f) / 20.0f);
+    // nothing more than 45 dB under the loudest hit is a hit
+    const float floorLin = std::max (std::pow (10.0f, (r.noiseFloorDb + 6.0f) / 20.0f), peak * std::pow (10.0f, -45.0f / 20.0f));
 
     // ---- onsets: the envelope jumps well above what it was 12 ms ago
     std::vector<Onset> onsets;
@@ -130,7 +134,10 @@ LearnResult analyzeLearn (const float* x, int n, double sr)
     std::vector<Onset> hits;
     for (auto& o : onsets)
     {
-        if (toDb (o.peakLin) >= cut) hits.push_back (o);
+        // a bump within 200 ms of a hit that is 9 dB or more under it is that hit still ringing, not a new hit: the plug-in
+        // must not fire on it either, so it counts with the bleed when the threshold is set
+        const bool ring = ! hits.empty() && (o.pos - hits.back().pos) < (int) (0.2 * sr) && toDb (o.peakLin) < toDb (hits.back().peakLin) - 9.0f;
+        if (toDb (o.peakLin) >= cut && ! ring) hits.push_back (o);
         else { r.bleedPos.push_back (o.pos); r.bleedDb.push_back (toDb (o.peakLin)); }
     }
     for (auto& o : hits) { r.hitPos.push_back (o.pos); r.hitDb.push_back (toDb (o.peakLin)); }

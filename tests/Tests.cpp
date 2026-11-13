@@ -588,6 +588,16 @@ struct SmartTests : juce::UnitTest
     void runTest() override
     {
         const double sr = 44100.0;
+        beginTest ("a track edited down to digital silence between the hits still reads as the real hits");
+        {
+            auto x = makeTrack (sr, 16, 0.0f, true);
+            for (auto& v : x) if (std::abs (v) < 0.003f) v = 0.0f;      // hard gate: decay tails end in ripples, the floor is silence
+            auto r = analyzeLearn (x.data(), (int) x.size(), sr);
+            expect (r.ok, r.message);
+            expect (r.hits >= 14 && r.hits <= 17, "hits: " + juce::String (r.hits));
+            expect (r.thresholdDb > -45.0f && r.thresholdDb < -20.0f, "threshold " + juce::String (r.thresholdDb));
+            expect (r.noiseFloorDb > -100.0f, "floor " + juce::String (r.noiseFloorDb));
+        }
         beginTest ("finds the hits, ignores quiet bleed, and puts the threshold between them");
         {
             auto x = makeTrack (sr, 16, 0.0f, true);
