@@ -244,6 +244,29 @@ int OpenTriggerProcessor::slotArticulation (int slot) const
     return (int) raw (slotParam (slot, "art"))->load();
 }
 
+namespace
+{
+// The pitch of a decoded piece: the loudest layer's first take, channels summed.
+float measureFundamental (const SlotContent& c)
+{
+    float g = 1.0f;
+    const auto* layer = otci::pickLayer (c.art(), 127, g);
+    if (layer == nullptr || layer->roundRobins.empty()) return 0.0f;
+    std::vector<float> mono;
+    double rate = 44100.0;
+    for (int idx : layer->roundRobins[0])
+    {
+        if (idx < 0 || idx >= (int) c.audio.size() || c.audio[(size_t) idx].getNumSamples() == 0) continue;
+        const auto& b = c.audio[(size_t) idx];
+        rate = c.rate[(size_t) idx];
+        if (mono.size() < (size_t) b.getNumSamples()) mono.resize ((size_t) b.getNumSamples(), 0.0f);
+        for (int ch = 0; ch < b.getNumChannels(); ++ch)
+            for (int i = 0; i < b.getNumSamples(); ++i) mono[(size_t) i] += b.getSample (ch, i);
+    }
+    return estimateFundamentalHz (mono.data(), (int) mono.size(), rate);
+}
+}
+
 void OpenTriggerProcessor::setSlotArticulation (int slot, int a, bool auditionWhenReady)
 {
     if (slot < 0 || slot >= kSlots) return;
@@ -341,6 +364,7 @@ void OpenTriggerProcessor::finishLoad (int slot, juce::uint64 gen, std::shared_p
     st.info.contentArticulation = content->articulation;
     const int decoded = content->articulation;
     st.info.content = content;                       // message-thread copy, read-only (level matching)
+    st.info.fundamentalHz = measureFundamental (*content);
     engine.setSlotContent (slot, std::move (content));
     if (auditionAfterBuild[(size_t) slot] && decoded == juce::jlimit (0, (int) st.info.data->meta.articulations.size() - 1, slotArticulation (slot)))
     {

@@ -1,4 +1,5 @@
 #include "SlotUi.h"
+#include "SmartTrigger.h"
 
 namespace
 {
@@ -181,6 +182,23 @@ SlotDetail::SlotDetail (OpenTriggerProcessor& p) : proc (p)
         tune[s] = std::make_unique<ParamKnob> (p.apvts, OpenTriggerProcessor::slotParam (s, "tune"), "Tune", true);
         addChildComponent (*pan[s]);
         addChildComponent (*tune[s]);
+        // Tune reads like a tuner: the pitch the piece rings at now ("187.3 Hz  F#3 +12c"); type a Hz value to tune to it.
+        auto& sl = tune[s]->slider;
+        sl.setTextBoxStyle (juce::Slider::TextBoxBelow, false, 126, 18);
+        sl.textFromValueFunction = [this] (double semis)
+        {
+            const float base = info.fundamentalHz;
+            if (base <= 0.0f) return juce::String (semis, 2) + " st";
+            const float hz = tunedHz (base, (float) semis);
+            return juce::String (hz, 1) + " Hz  " + noteWithCents (hz);
+        };
+        sl.valueFromTextFunction = [this] (const juce::String& text)
+        {
+            const auto t = text.trim();
+            const float v = t.getFloatValue(), base = info.fundamentalHz;
+            if (base <= 0.0f || t.containsIgnoreCase ("st")) return (double) v;
+            return (double) juce::jlimit (-12.0f, 12.0f, semisForHz (base, v));
+        };
     }
     setSlot (0);
     startTimerHz (15);
@@ -212,7 +230,9 @@ void SlotDetail::timerCallback()
     const auto now = proc.slotInfo (slot);
     const bool changedData = now.data != info.data || now.status != info.status;
     if (now.data != info.data) activeGroup.clear();
+    const bool pitchChanged = now.fundamentalHz != info.fundamentalHz;
     info = now;
+    if (pitchChanged) tune[slot]->slider.updateText();
     if (changedData) layoutChips();
     const int art = proc.slotArticulation (slot);
     if (art != shownArt || changedData)

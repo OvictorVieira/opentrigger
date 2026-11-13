@@ -1060,6 +1060,60 @@ struct LaneEngineTests : juce::UnitTest
 static LaneEngineTests laneEngineTests;
 
 static SmartTests smartTests;
+struct TuningTests : juce::UnitTest
+{
+    TuningTests() : juce::UnitTest ("Tuning", "OpenTrigger") {}
+    static std::vector<float> drum (double sr, double f0, double overtoneGain, double seconds = 0.8)
+    {
+        std::vector<float> x ((size_t) (sr * seconds));
+        for (size_t i = 0; i < x.size(); ++i)
+        {
+            const double t = (double) i / sr, env = std::exp (-t * 6.0);
+            x[i] = (float) (env * (std::sin (6.2831853 * f0 * t) + overtoneGain * std::sin (6.2831853 * 2.0 * f0 * t)));
+        }
+        x[0] += 0.8f;                                      // beater click at the very start
+        return x;
+    }
+    void runTest() override
+    {
+        beginTest ("finds the pitch a drum rings at, to a fraction of a Hz");
+        for (double sr : { 44100.0, 48000.0 })
+            for (double f0 : { 55.0, 98.0, 185.0, 240.0 })
+            {
+                auto x = drum (sr, f0, 0.0);
+                const float hz = estimateFundamentalHz (x.data(), (int) x.size(), sr);
+                expect (std::abs (hz - f0) < 1.0, "sr " + juce::String (sr) + " f0 " + juce::String (f0) + " got " + juce::String (hz));
+            }
+        beginTest ("a stronger first overtone does not fool it into an octave up");
+        {
+            auto x = drum (44100.0, 120.0, 1.3);
+            const float hz = estimateFundamentalHz (x.data(), (int) x.size(), 44100.0);
+            expect (std::abs (hz - 120.0f) < 1.0f, "got " + juce::String (hz));
+        }
+        beginTest ("noise has no pitch");
+        {
+            juce::Random r (7);
+            std::vector<float> x (44100);
+            for (auto& v : x) v = r.nextFloat() * 2.0f - 1.0f;
+            expectEquals (estimateFundamentalHz (x.data(), (int) x.size(), 44100.0), 0.0f);
+            expectEquals (estimateFundamentalHz (x.data(), 100, 44100.0), 0.0f);
+        }
+        beginTest ("Hz, semitones and note names agree");
+        {
+            expectWithinAbsoluteError (tunedHz (100.0f, 12.0f), 200.0f, 0.01f);
+            expectWithinAbsoluteError (tunedHz (100.0f, -12.0f), 50.0f, 0.01f);
+            expectWithinAbsoluteError (semisForHz (100.0f, 200.0f), 12.0f, 0.001f);
+            expectWithinAbsoluteError (semisForHz (tunedHz (187.3f, 3.37f), 0.0f + tunedHz (187.3f, 3.37f)), 0.0f, 0.001f);
+            expectEquals (semisForHz (0.0f, 100.0f), 0.0f);
+            expectEquals (noteWithCents (440.0f), juce::String ("A4 +0c"));
+            expectEquals (noteWithCents (261.63f), juce::String ("C4 +0c"));
+            expect (noteWithCents (450.0f).startsWith ("A4 +39c") || noteWithCents (450.0f).startsWith ("A4 +38c"), noteWithCents (450.0f));
+            expectEquals (noteWithCents (0.0f), juce::String());
+        }
+    }
+};
+static TuningTests tuningTests;
+
 static DraftTests draftTests;
 static OtciTests otciTests;
 } // namespace

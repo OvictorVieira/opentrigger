@@ -33,3 +33,10 @@ struct LearnResult
 
 // x: mono audio as the plug-in received it (before its own input gain / gate).
 LearnResult analyzeLearn (const float* x, int numSamples, double sampleRate);
+
+// Tuning: the pitch a drum rings at, in Hz (0 when no clear pitch is found). x: one hit, mono, starting at the attack.
+float estimateFundamentalHz (const float* x, int numSamples, double sampleRate);
+// Tune knob helpers: semitones <-> the Hz the piece sounds at, and the note name with cents ("F#3 +12c").
+float tunedHz (float baseHz, float semis);
+float semisForHz (float baseHz, float targetHz);
+juce::String noteWithCents (float hz);

@@ -242,3 +242,66 @@ LearnResult analyzeLearn (const float* x, int n, double sr)
                 + ". Threshold " + juce::String (r.thresholdDb, 1) + " dB, retrigger " + juce::String ((int) r.retriggerMs) + " ms.";
     return r;
 }
+
+float estimateFundamentalHz (const float* x, int n, double sr)
+{
+    if (x == nullptr || n < 2048 || sr <= 0.0) return 0.0f;
+    const int searchEnd = std::min (n, (int) (0.2 * sr));
+    int pk = 0;
+    for (int i = 0; i < searchEnd; ++i) if (std::abs (x[i]) > std::abs (x[pk])) pk = i;
+    const int start = pk + (int) (0.004 * sr);          // let the stick/beater click pass; the shell keeps ringing
+    const int len = std::min (16384, n - start);
+    if (len < 2048) return 0.0f;
+    const int N = 65536;
+    std::vector<std::complex<float>> a ((size_t) N, { 0.0f, 0.0f });
+    for (int i = 0; i < len; ++i)
+    {
+        const float w = 0.5f - 0.5f * std::cos (2.0f * juce::MathConstants<float>::pi * (float) i / (float) (len - 1));
+        a[(size_t) i] = { x[start + i] * w, 0.0f };
+    }
+    fft (a);
+    const double binHz = sr / N;
+    const int lo = std::max (2, (int) std::ceil (30.0 / binHz)), hi = std::min (N / 2 - 2, (int) (700.0 / binHz));
+    if (hi <= lo) return 0.0f;
+    std::vector<float> mag ((size_t) hi + 2);
+    for (int k = 0; k <= hi + 1; ++k) mag[(size_t) k] = std::abs (a[(size_t) k]);
+    int best = lo;
+    for (int k = lo; k <= hi; ++k) if (mag[(size_t) k] > mag[(size_t) best]) best = k;
+    std::vector<float> band (mag.begin() + lo, mag.begin() + hi + 1);
+    const float median = percentile (band, 0.5f);
+    if (mag[(size_t) best] < 4.0f * std::max (median, 1e-9f)) return 0.0f;        // no clear peak: noise, not a pitch
+    // a drum's strongest partial is often the first overtone: prefer the half-frequency peak when it is almost as strong
+    // (a peak above 350 Hz is almost never a shell's fundamental, so there the bar is lower)
+    const float bar = best * binHz > 350.0 ? 0.3f : 0.5f;
+    for (int pass = 0; pass < 2; ++pass)
+    {
+        const int half = best / 2;
+        if (half < lo) break;
+        int h = half;
+        for (int k = std::max (lo, half - half / 25 - 1); k <= std::min (hi, half + half / 25 + 1); ++k) if (mag[(size_t) k] > mag[(size_t) h]) h = k;
+        if (mag[(size_t) h] < bar * mag[(size_t) best]) break;
+        best = h;
+    }
+    // parabolic interpolation on the log spectrum for sub-bin accuracy
+    const float l = std::log (std::max (mag[(size_t) best - 1], 1e-12f)), c = std::log (std::max (mag[(size_t) best], 1e-12f)), r = std::log (std::max (mag[(size_t) best + 1], 1e-12f));
+    const float den = l - 2.0f * c + r;
+    const float off = den < -1e-9f ? juce::jlimit (-0.5f, 0.5f, 0.5f * (l - r) / den) : 0.0f;
+    return (float) ((best + off) * binHz);
+}
+
+float tunedHz (float baseHz, float semis) { return baseHz * std::pow (2.0f, semis / 12.0f); }
+float semisForHz (float baseHz, float targetHz)
+{
+    if (baseHz <= 0.0f || targetHz <= 0.0f) return 0.0f;
+    return 12.0f * std::log2 (targetHz / baseHz);
+}
+juce::String noteWithCents (float hz)
+{
+    if (hz <= 0.0f) return {};
+    const float midi = 69.0f + 12.0f * std::log2 (hz / 440.0f);
+    const int nearest = (int) std::lround (midi);
+    const int cents = (int) std::lround ((midi - (float) nearest) * 100.0f);
+    static const char* names[12] = { "C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B" };
+    const int pc = ((nearest % 12) + 12) % 12;
+    return juce::String (names[pc]) + juce::String (nearest / 12 - 1) + " " + (cents >= 0 ? "+" : "") + juce::String (cents) + "c";
+}

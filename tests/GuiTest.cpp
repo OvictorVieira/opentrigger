@@ -292,6 +292,43 @@ struct GuiTests : juce::UnitTest
             ui->selectSlot (0);
         }
 
+        beginTest ("Tune reads like a tuner: Hz and note of the piece, typing Hz sets the semitones");
+        {
+            const double f0 = 110.0;
+            juce::AudioBuffer<float> tone (1, 44100);
+            for (int i = 0; i < tone.getNumSamples(); ++i) tone.setSample (0, i, (float) (std::exp (-i / 44100.0 * 5.0) * std::sin (6.2831853 * f0 * i / 44100.0)));
+            otci::Instrument k; k.name = "Tom Tone"; k.library = "Lib One";
+            otci::Wave w; w.flac = encodeFlac (tone, 44100.0, 24); w.frames = tone.getNumSamples(); w.channels = 1; w.rate = 44100.0;
+            k.waves = { w };
+            otci::Articulation a0; a0.name = "Hit"; a0.layers = { { 0, 1.0f, 1.0f, { { 0 } } } };
+            k.articulations = { a0 };
+            auto tf = lib.getChildFile ("Tom Tone.otci");
+            juce::String terr; otci::write (tf, k, terr);
+            proc.loadSlot (6, tf);
+            waitUntil ([&] { return ready (proc, 6) && proc.slotInfo (6).fundamentalHz > 0.0f; });
+            expect (std::abs (proc.slotInfo (6).fundamentalHz - 110.0f) < 1.0f, "measured " + juce::String (proc.slotInfo (6).fundamentalHz));
+            auto& d = ui->detail();
+            d.setSlot (6);
+            for (int i = 0; i < 10; ++i) juce::MessageManager::getInstance()->runDispatchLoopUntil (20);
+            ParamKnob* knob = nullptr;
+            for (auto* ch : d.getChildren())
+                if (auto* pk = dynamic_cast<ParamKnob*> (ch); pk != nullptr && pk->isVisible() && pk->slider.getMinimum() == -12.0 && pk->slider.getMaximum() == 12.0
+                    && pk->slider.getProperties()["bipolar"] && pk->slider.getTextBoxWidth() == 126) knob = pk;
+            expect (knob != nullptr, "tune knob found");
+            if (knob != nullptr)
+            {
+                expect (knob->slider.getTextFromValue (0.0).startsWith ("110."), knob->slider.getTextFromValue (0.0));
+                expect (knob->slider.getTextFromValue (0.0).contains ("A2"), knob->slider.getTextFromValue (0.0));
+                expect (knob->slider.getTextFromValue (12.0).startsWith ("220."), knob->slider.getTextFromValue (12.0));
+                const double semis = knob->slider.getValueFromText ("123.47 Hz");           // B2
+                expectWithinAbsoluteError (semis, 2.0, 0.02);
+                expect (knob->slider.getValueFromText ("500 Hz") == 12.0, "clamped to the knob range");
+                expectWithinAbsoluteError (knob->slider.getValueFromText ("3.5 st"), 3.5, 1e-6);
+            }
+            proc.clearSlot (6);
+            tf.deleteFile();
+        }
+
         beginTest ("slot parameters: mute silences that slot, volume and pan apply");
         proc.apvts.getParameter ("s1_mute")->setValueNotifyingHost (1.0f);
         expectWithinAbsoluteError (hit (proc, 60, 100), 0.15f, 3e-3f);

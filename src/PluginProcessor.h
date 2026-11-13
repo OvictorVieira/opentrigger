@@ -39,6 +39,7 @@ public:
         std::shared_ptr<const InstrumentData> data;
         std::shared_ptr<const SlotContent> content;   // decoded audio of the current mic (shared with the engine, read-only)
         int contentArticulation = 0; // articulation currently decoded in the engine
+        float fundamentalHz = 0.0f;  // pitch the piece rings at (0 = unknown), measured from the decoded sound; basis of the Tune readout
         juce::String error;
     };
     SlotInfo slotInfo (int slot) const { return slotState[(size_t) slot].info; }
