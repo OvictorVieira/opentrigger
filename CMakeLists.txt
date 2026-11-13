@@ -59,6 +59,28 @@ target_link_libraries(OpenTrigger PRIVATE ot_core
     PUBLIC juce::juce_recommended_config_flags juce::juce_recommended_warning_flags)
 target_compile_definitions(OpenTrigger PUBLIC JUCE_VST3_CAN_REPLACE_VST2=0 JUCE_VST3_EMULATE_MIDI_CC_WITH_PARAMETERS=0)
 
+# The same plug-in with all 8 stereo outputs (16 channels) on from the start, so a host maps them to the track by itself.
+# Hosts such as REAPER list a multi-output instrument as "(16 out)" and route every output to the track on insert, which they
+# do not do for an effect, so this one is declared an instrument (it still reads the track audio on its input).
+# It is a separate plug-in in the host's list ("OpenTrigger 16out"); projects, presets and settings are interchangeable.
+juce_add_plugin(OpenTrigger16
+    COMPANY_NAME "OpenTrigger"
+    PLUGIN_MANUFACTURER_CODE Otrg
+    PLUGIN_CODE Otr2
+    FORMATS VST3 AU
+    PRODUCT_NAME "OpenTrigger 16out"
+    IS_SYNTH TRUE
+    NEEDS_MIDI_INPUT TRUE
+    NEEDS_MIDI_OUTPUT FALSE
+    COPY_PLUGIN_AFTER_BUILD FALSE
+    AU_MAIN_TYPE kAudioUnitType_MusicDevice
+    VST3_CATEGORIES Instrument)
+target_sources(OpenTrigger16 PRIVATE src/PluginProcessor.cpp src/PluginEditor.cpp src/EditorPanel.cpp src/UiKit.cpp src/SlotUi.cpp src/SmartUi.cpp)
+target_link_libraries(OpenTrigger16 PRIVATE ot_core
+    juce::juce_audio_utils juce::juce_gui_extra
+    PUBLIC juce::juce_recommended_config_flags juce::juce_recommended_warning_flags)
+target_compile_definitions(OpenTrigger16 PUBLIC JUCE_VST3_CAN_REPLACE_VST2=0 JUCE_VST3_EMULATE_MIDI_CC_WITH_PARAMETERS=0 OT_ALL_OUTPUTS=1)
+
 juce_add_console_app(ot_pack PRODUCT_NAME "ot_pack")
 target_sources(ot_pack PRIVATE tools/PackCli.cpp)
 target_link_libraries(ot_pack PRIVATE ot_core juce::juce_recommended_config_flags)

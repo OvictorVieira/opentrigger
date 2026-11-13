@@ -64,16 +64,22 @@ juce::AudioProcessorValueTreeState::ParameterLayout OpenTriggerProcessor::create
     return { p.begin(), p.end() };
 }
 
+// The "16 out" build has every output switched on from the start, so the host routes them without any pin set-up.
+#ifdef OT_ALL_OUTPUTS
+ #define OT_AUX_ON true
+#else
+ #define OT_AUX_ON false
+#endif
 OpenTriggerProcessor::OpenTriggerProcessor()
     : AudioProcessor (BusesProperties().withInput ("Input", juce::AudioChannelSet::stereo(), true)
                                        .withOutput ("Output", juce::AudioChannelSet::stereo(), true)
-                                       .withOutput ("Out 2", juce::AudioChannelSet::stereo(), false)
-                                       .withOutput ("Out 3", juce::AudioChannelSet::stereo(), false)
-                                       .withOutput ("Out 4", juce::AudioChannelSet::stereo(), false)
-                                       .withOutput ("Out 5", juce::AudioChannelSet::stereo(), false)
-                                       .withOutput ("Out 6", juce::AudioChannelSet::stereo(), false)
-                                       .withOutput ("Out 7", juce::AudioChannelSet::stereo(), false)
-                                       .withOutput ("Out 8", juce::AudioChannelSet::stereo(), false)),
+                                       .withOutput ("Out 2", juce::AudioChannelSet::stereo(), OT_AUX_ON)
+                                       .withOutput ("Out 3", juce::AudioChannelSet::stereo(), OT_AUX_ON)
+                                       .withOutput ("Out 4", juce::AudioChannelSet::stereo(), OT_AUX_ON)
+                                       .withOutput ("Out 5", juce::AudioChannelSet::stereo(), OT_AUX_ON)
+                                       .withOutput ("Out 6", juce::AudioChannelSet::stereo(), OT_AUX_ON)
+                                       .withOutput ("Out 7", juce::AudioChannelSet::stereo(), OT_AUX_ON)
+                                       .withOutput ("Out 8", juce::AudioChannelSet::stereo(), OT_AUX_ON)),
       apvts (*this, nullptr, "OPENTRIGGER", createLayout())
 {
     const char* gids[gCount] = { "mix", "gain", "threshold", "holdoff", "source", "inGain", "lowcut", "highcut", "gateOn",
